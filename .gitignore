@@ -1,0 +1,21 @@
+# Dev Environment
+env
+venv
+.mypy_cache
+.vscode
+.idea/
+build
+__pycache__
+*.DS_Store
+
+# Python
+.python-version
+*.egg-info
+
+# Byte-compiled / optimized / DLL files
+*.py[cod]
+*$py.class
+
+# Pytorch
+*.pth
+*.pt
