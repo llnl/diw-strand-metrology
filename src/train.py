@@ -255,8 +255,8 @@ def main(
     loggers = [TensorBoardLogger(tensorboard_dir, name="tensorboard")]
 
     # Create Training Strategy
-    if num_gpus > 1:
-        strategy = "ddp"
+    if num_gpus > 0:
+        strategy = "ddp" if num_gpus > 1 else "auto"
         accelerator = "gpu"
     else:
         strategy = "auto"
