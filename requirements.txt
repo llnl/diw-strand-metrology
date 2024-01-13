@@ -10,3 +10,4 @@ tensorboard
 timm
 sagemaker
 torchmetrics
+wandb

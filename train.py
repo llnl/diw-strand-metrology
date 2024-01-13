@@ -5,12 +5,15 @@ import pytorch_lightning as pl
 import torch
 import yaml
 
-from pytorch_lightning.loggers import TensorBoardLogger
+#from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.loggers import WandbLogger
+
 from pytorch_lightning.callbacks import (
     LearningRateMonitor,
     ModelCheckpoint,
     TQDMProgressBar,
 )
+
 from typing import Optional, Tuple
 
 from llnl_ml.model import count_parameters
@@ -147,6 +150,8 @@ def main(
     center_crop: bool = False,
     center_crop_size: int = 1200,
     center_crop_offset: Tuple[int] = (-60, -50),
+    project_name: str = "test_name",
+    run_name: str = "run_name",
 ) -> None:
     """
     :param model_name: Name of model to train
@@ -177,6 +182,7 @@ def main(
     :param center_crop: If True, takes a center crop of the image and mask prior to transforms
     :param center_crop_size: Size of the center crop
     :param center_crop_offset: Offsets the center of the crop by [Row, Col] or [Height, Width]
+    :param project_name: Give this project a name so it shows up in Sagemaker and wandb. 
     """
     logger.info("Starting training run with the following parameters:")
     logger.info(f"{locals()}")
@@ -195,8 +201,14 @@ def main(
     with open(os.path.join(model_dir, "config.yaml"), "w") as fp:
         yaml.dump(data_config, fp)
 
+
     # Get the number of GPUs available for training for use later
     num_gpus = torch.cuda.device_count()
+    
+    if num_gpus>0:
+        loggers = WandbLogger(entity="aqa_llnl", project=project_name, name=run_name, config=vars(args))
+    else:
+        loggers = []
 
     # Load the Model
     # TODO: Add init params to adjust UNet shape
@@ -252,10 +264,10 @@ def main(
     ]
 
     # Create loggers
-    loggers = [TensorBoardLogger(tensorboard_dir, name="tensorboard")]
+    #loggers = [TensorBoardLogger(tensorboard_dir, name="tensorboard")]
 
     # Create Training Strategy
-    if num_gpus > 1:
+    if num_gpus > 0:
         strategy = "ddp"
         accelerator = "gpu"
     else:
