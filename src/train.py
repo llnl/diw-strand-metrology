@@ -18,6 +18,9 @@ from llnl_ml.data import get_data_loaders
 from llnl_ml.lightning import SegmentationLightningModule
 from llnl_ml.util import str2bool, str2intlist
 
+from pytorch_lightning.loggers import WandbLogger
+import wandb
+
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -114,6 +117,18 @@ def parse_args():
         default=[-60, -50],
         help="Center off set as list [Y, X] or [Height, Width] order",
     )
+    parser.add_argument(
+        "--project_name",
+        type=str,
+        default="project_name2",
+        help="  ",
+    )
+    parser.add_argument(
+        "--run_name",
+        type=str,
+        default="run_name2",
+        help="  ",
+    )
 
     args, model_params = parser.parse_known_args()
     return args, model_params
@@ -147,6 +162,8 @@ def main(
     center_crop: bool = False,
     center_crop_size: int = 1200,
     center_crop_offset: Tuple[int] = (-60, -50),
+    project_name: str = 'project_name',
+    run_name: str = 'run_name',
 ) -> None:
     """
     :param model_name: Name of model to train
@@ -180,6 +197,8 @@ def main(
     """
     logger.info("Starting training run with the following parameters:")
     logger.info(f"{locals()}")
+
+    wandb_logger = WandbLogger(entity="aqa_llnl", project=project_name, name=run_name) #, config=vars(args))
 
     # Save input information important for inference later as a config.yaml file in the model output dir
     data_config = dict(
@@ -269,7 +288,7 @@ def main(
         devices=max(num_gpus, 1),
         strategy=strategy,
         default_root_dir=model_dir,
-        logger=loggers,
+        logger=wandb_logger,
         callbacks=callbacks,
         precision="16-mixed" if use_amp else 32,
         log_every_n_steps=10,
