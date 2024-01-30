@@ -11,3 +11,5 @@ timm
 sagemaker
 torchmetrics
 wandb
+ipywidgets
+matplotlib
