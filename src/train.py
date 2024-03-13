@@ -19,7 +19,6 @@ from llnl_ml.lightning import SegmentationLightningModule
 from llnl_ml.util import str2bool, str2intlist
 
 from pytorch_lightning.loggers import WandbLogger
-import wandb
 
 
 logging.basicConfig(level=logging.INFO)
@@ -47,24 +46,49 @@ def parse_args():
         default=os.environ["SM_CHANNEL_TRAIN_MASK"],
         help="Path to the folder containing masks",
     )
-
+    parser.add_argument(
+        "--split_file",
+        type=str,
+        default=None,
+        help=(
+            "Path or S3 uri to json file containing the images and masks filenames for the train, val, "
+            "and test splits. Will prepend the image and mask folder names to filenames in the split. "
+            "If not provided, will create splits randomly from all available images in the image and mask folders."
+        ),
+    )
+    parser.add_argument(
+        "--train_count",
+        type=int,
+        default=-1,
+        help="Maximum number of training images to use. Use -1 to use all images.",
+    )
     parser.add_argument(
         "--output_data_dir",
         type=str,
-        default=os.environ["SM_OUTPUT_DATA_DIR"],
-        help="Location for saving output artifacts",
+        default=os.environ.get("SM_OUTPUT_DATA_DIR", "output/data"),
+        help="Location for saving output artifacts like logs, metrics, etc.",
     )
     parser.add_argument(
         "--tensorboard_dir",
         type=str,
-        default=os.environ.get("SM_OUTPUT_DIR"),
+        default=os.environ.get("SM_OUTPUT_DIR", "output/"),
         help="Location for saving tensorboard logs",
     )
     parser.add_argument(
         "--model_dir",
         type=str,
-        default=os.environ["SM_MODEL_DIR"],
+        default=os.environ.get("SM_MODEL_DIR", "output/model/"),
         help="Location for saving the model",
+    )
+    parser.add_argument(
+        "--checkpoint_dir",
+        type=str,
+        default="/opt/ml/checkpoints",
+        help=(
+            "Location to save intermediate training checkpoints. "
+            "If directory is not empty, will restart training using the last.ckpt. "
+            "Used by spot instance training to allow for graceful start/resume cycles."
+        ),
     )
     parser.add_argument("--num_workers", type=int, default=1, help="Number of workers for data loading")
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size for training")
@@ -141,6 +165,9 @@ def main(
     output_data_dir: str,
     tensorboard_dir: str,
     model_dir: str,
+    checkpoint_dir: str = "/opt/ml/checkpoints",
+    split_file: Optional[str] = None,
+    train_count: int = -1,
     model_params: Optional[dict] = None,
     num_workers: int = 1,
     batch_size: int = 2,
@@ -162,8 +189,8 @@ def main(
     center_crop: bool = False,
     center_crop_size: int = 1200,
     center_crop_offset: Tuple[int] = (-60, -50),
-    project_name: str = 'project_name',
-    run_name: str = 'run_name',
+    project_name: str = "project_name",
+    run_name: str = "run_name",
 ) -> None:
     """
     :param model_name: Name of model to train
@@ -171,7 +198,14 @@ def main(
     :param mask_folder: Path to masks
     :param output_data_dir: Path to output data such as tensorboard logs, argument dump, etc.
     :param tensorboard_dir: Path to tensorboard output location. Will append "/tensorboard" to given path.
-    :param model_dir: Directory to save model weights
+    :param model_dir: Directory to save final model weights and the config file.
+    :param checkpoint_dir: Directory to save intermediate training checkpoints. If directory not empty, will resume
+        training from the 'last.ckpt' checkpoint in the folder.
+    :param split_file: Path to json file with keys "train", "val" and "test". Each key has keys of "image" and "mask"
+        with lists of filenames for that split. If not given, splits are generated randomly from all available data.
+        Can be local path or S3 uri
+    :param train_count: Maximum number of training samples to use. Use -1 to use all samples. Otherwise, train_count
+        random samples will be used for training.
     :param model_params: Optional dict containing
     :param num_workers: Number or process workers for data loading
     :param batch_size: Batch size per GPU for training
@@ -194,11 +228,13 @@ def main(
     :param center_crop: If True, takes a center crop of the image and mask prior to transforms
     :param center_crop_size: Size of the center crop
     :param center_crop_offset: Offsets the center of the crop by [Row, Col] or [Height, Width]
+    :param project_name: Name of WandB project
+    :param run_name: Run name for tracking in WandB project
     """
     logger.info("Starting training run with the following parameters:")
     logger.info(f"{locals()}")
 
-    wandb_logger = WandbLogger(entity="aqa_llnl", project=project_name, name=run_name) #, config=vars(args))
+    wandb_logger = WandbLogger(entity="aqa_llnl", project=project_name, name=run_name)  # , config=vars(args))
 
     # Save input information important for inference later as a config.yaml file in the model output dir
     data_config = dict(
@@ -240,9 +276,15 @@ def main(
         image_folder=image_folder,
         mask_folder=mask_folder,
         batch_size=batch_size,
+        split_file=split_file,
+        train_count=train_count,
+        val_batch_size=val_batch_size,
+        test_batch_size=test_batch_size,
         num_workers=num_workers,
         image_mode=image_mode,
         image_size=image_size,
+        val_image_size=val_image_size,
+        test_image_size=test_image_size,
         use_random_resize=use_random_resize,
         use_random_rotate=use_random_rotation,
         color_jitter=color_jitter,
@@ -254,7 +296,7 @@ def main(
 
     # Create callbacks
     model_ckpt_callback = ModelCheckpoint(
-        dirpath=model_dir,
+        dirpath=checkpoint_dir,
         monitor="val_loss",
         mode="min",
         filename="{epoch:02d}-{val_loss:.3f}",
@@ -281,13 +323,18 @@ def main(
         strategy = "auto"
         accelerator = "cpu"
 
+    # See if prior run exists
+    resume_checkpoint = None
+    if os.path.exists(os.path.join(checkpoint_dir, "last.ckpt")):
+        resume_checkpoint = os.path.join(checkpoint_dir, "last.ckpt")
+
     # Create Trainer
     trainer = pl.Trainer(
         max_epochs=epochs,
         accelerator=accelerator,
         devices=max(num_gpus, 1),
         strategy=strategy,
-        default_root_dir=model_dir,
+        default_root_dir=output_data_dir,
         logger=wandb_logger,
         callbacks=callbacks,
         precision="16-mixed" if use_amp else 32,
@@ -295,15 +342,32 @@ def main(
     )
 
     # Train the model
-    trainer.fit(model=module, train_dataloaders=train_loader, val_dataloaders=val_loader)
+    trainer.fit(model=module, train_dataloaders=train_loader, val_dataloaders=val_loader, ckpt_path=resume_checkpoint)
 
-    # Load the best checkpoint to evaluate on the test model and save just model weights
-    best_model_ckpt_path = model_ckpt_callback.best_model_path
-    # logger.info(f"Best model checkpoint at {best_model_ckpt_path}")
-    # Make a copy of the best checkpoint named "best.ckpt"
+    # Shut down process group if launched to ensure training doesn't hang
+    torch.distributed.destroy_process_group()
+    # Run Testing on a single device
+    if trainer.is_global_zero:
+        trainer = pl.Trainer(
+            logger=wandb_logger,
+            devices=1,
+            num_nodes=1,
+            max_epochs=epochs,
+            accelerator=accelerator,
+            callbacks=callbacks,
+        )
 
-    # Run test using the best model weights path
-    trainer.test(model=module, dataloaders=test_loader)
+        # Load the best model checkpoint
+        logger.info(f"Testing with best performing model parameters: \n\t{model_ckpt_callback.best_model_path}")
+        # Run test using the best model weights path
+        test_results = trainer.test(
+            model=module, dataloaders=test_loader, ckpt_path=model_ckpt_callback.best_model_path
+        )
+        trainer.save_checkpoint(os.path.join(model_dir, "best.ckpt"), weights_only=True)
+
+        # Save the test results in a yaml file in the output directory
+        with open(os.path.join(output_data_dir, "test_results.yaml"), "w") as fp:
+            yaml.dump(test_results, fp)
 
 
 if __name__ == "__main__":

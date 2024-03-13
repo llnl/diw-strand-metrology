@@ -1,8 +1,10 @@
 import cv2
 import logging
+import json
 import os
 import math
 import numpy as np
+import random
 import torch
 
 from torch.utils.data import Dataset, DataLoader, default_collate
@@ -27,8 +29,7 @@ else:
 
 from sklearn.model_selection import train_test_split
 
-from typing import List, Optional, Tuple
-
+from typing import List, Optional, Tuple, Dict, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -167,6 +168,8 @@ def get_data_loaders(
     image_folder: str,
     mask_folder: str,
     batch_size: int,
+    split_file: Optional[str] = None,
+    train_count: Optional[int] = -1,
     val_batch_size: Optional[int] = None,
     test_batch_size: Optional[int] = None,
     num_workers: int = 8,
@@ -183,27 +186,51 @@ def get_data_loaders(
     center_crop_offset: Tuple[int] = (-60, -50),
     needs_boxes: bool = False,
 ):
-    image_paths = sorted(
-        [
-            os.path.join(image_folder, fname)
-            for fname in os.listdir(image_folder)
-            if fname.endswith(("jpeg", "png", "jpg"))
-        ]
-    )
-    mask_paths = sorted(
-        [
-            os.path.join(mask_folder, fname)
-            for fname in os.listdir(mask_folder)
-            if fname.endswith(("jpeg", "png", "jpg"))
-        ]
-    )
+    if split_file is not None:
 
-    # Split data into train, validation, and test sets
-    img_train, img_temp, mask_train, mask_temp = train_test_split(
-        image_paths, mask_paths, test_size=0.2, random_state=42
-    )
-    img_val, img_test, mask_val, mask_test = train_test_split(img_temp, mask_temp, test_size=0.5, random_state=42)
+        def prepend_directory(filenames, directory):
+            return [os.path.join(directory, fn) for fn in filenames]
 
+        split_dict = _load_json_file(split_file)
+
+        img_train = prepend_directory(split_dict["train"]["image"], image_folder)
+        mask_train = prepend_directory(split_dict["train"]["mask"], mask_folder)
+
+        img_val = prepend_directory(split_dict["val"]["image"], image_folder)
+        mask_val = prepend_directory(split_dict["val"]["mask"], mask_folder)
+
+        img_test = prepend_directory(split_dict["test"]["image"], image_folder)
+        mask_test = prepend_directory(split_dict["test"]["mask"], mask_folder)
+    else:
+        image_paths = sorted(
+            [
+                os.path.join(image_folder, fname)
+                for fname in os.listdir(image_folder)
+                if fname.endswith(("jpeg", "png", "jpg"))
+            ]
+        )
+        mask_paths = sorted(
+            [
+                os.path.join(mask_folder, fname)
+                for fname in os.listdir(mask_folder)
+                if fname.endswith(("jpeg", "png", "jpg"))
+            ]
+        )
+
+        # Split data into train, validation, and test sets
+        img_train, img_temp, mask_train, mask_temp = train_test_split(
+            image_paths, mask_paths, test_size=0.2, random_state=42
+        )
+        img_val, img_test, mask_val, mask_test = train_test_split(img_temp, mask_temp, test_size=0.5, random_state=42)
+
+    # Sub-sample training set if percent_train is less than 1.0
+    if train_count > 1:
+        init_train_count = len(img_train)
+        train_count = min(init_train_count, train_count)
+        sampled_ind = sorted(random.sample(range(init_train_count), k=train_count))
+        img_train = [img_train[ind] for ind in sampled_ind]
+        mask_train = [mask_train[ind] for ind in sampled_ind]
+        logger.info(f"Training with {len(sampled_ind)}/{init_train_count} training images.")
     # Set up Train and Val transformations
     # For example see:
     # https://pytorch.org/vision/0.15/auto_examples/plot_transforms_v2_e2e.html#sphx-glr-auto-examples-plot-transforms-v2-e2e-py
@@ -279,3 +306,17 @@ def get_data_loaders(
     )
 
     return train_loader, val_loader, test_loader
+
+
+def _load_json_file(filename: str) -> Dict[str, Dict[str, Sequence]]:
+    if filename.startswith("s3://"):
+        import boto3
+
+        s3 = boto3.resource("s3")
+        bucket, key = filename.removeprefix("s3://").split("/", 1)
+        data = s3.Object(bucket, key).get()["Body"].read().decode()
+        split_file = json.loads(data)
+    else:
+        with open(filename, "r") as fp:
+            split_file = json.load(fp)
+    return split_file

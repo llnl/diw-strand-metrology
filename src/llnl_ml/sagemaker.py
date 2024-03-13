@@ -1,18 +1,17 @@
 from lightning.pytorch.loggers.logger import Logger
 from lightning.pytorch.utilities import rank_zero_only
 
-
 SM_METRICS_DEFINITIONS = [
-    {"Name": "train:loss", "Regex": "train_loss=(.*?)[,\]]"},
-    {"Name": "val:loss", "Regex": "val_loss=(.*?)[,\]]"},
-    {"Name": "learning_rate", "Regex": "lr=(.*?)[,\]]"},
-    {"Name": "val:acc", "Regex": "val_acc=(.*?)[,\]]"},
-    {"Name": "val:jaccard", "Regex": "val_jaccard=(.*?)[,\]]"},
-    {"Name": "val:dice", "Regex": "val_dice=(.*?)[,\]]"},
-    {"Name": "test:loss", "Regex": "test_loss=(.*?)[,\]]"},
-    {"Name": "test:acc", "Regex": "test_acc=(.*?)[,\]]"},
-    {"Name": "test:jaccard", "Regex": "test_jaccard=(.*?)[,\]]"},
-    {"Name": "test:dice", "Regex": "test_dice=(.*?)[,\]]"},
+    {"Name": "train:loss", "Regex": "train_loss=(.*?)[,\]]"},  # noqa: W605
+    {"Name": "val:loss", "Regex": "val_loss=(.*?)[,\]]"},  # noqa: W605
+    {"Name": "learning_rate", "Regex": "lr=(.*?)[,\]]"},  # noqa: W605
+    {"Name": "val:acc", "Regex": "val_acc=(.*?)[,\]]"},  # noqa: W605
+    {"Name": "val:jaccard", "Regex": "val_jaccard=(.*?)[,\]]"},  # noqa: W605
+    {"Name": "val:dice", "Regex": "val_dice=(.*?)[,\]]"},  # noqa: W605
+    {"Name": "test:loss", "Regex": "test_loss=(.*?)[,\]]"},  # noqa: W605
+    {"Name": "test:acc", "Regex": "test_acc=(.*?)[,\]]"},  # noqa: W605
+    {"Name": "test:jaccard", "Regex": "test_jaccard=(.*?)[,\]]"},  # noqa: W605
+    {"Name": "test:dice", "Regex": "test_dice=(.*?)[,\]]"},  # noqa: W605
 ]
 
 

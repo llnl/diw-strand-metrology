@@ -16,7 +16,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def model_fn(model_dir, context):
-    model = SegmentationLightningModule.load_from_checkpoint(os.path.join(model_dir, "last.ckpt"))
+    model = SegmentationLightningModule.load_from_checkpoint(os.path.join(model_dir, "best.ckpt"))
     model.to(device).eval()
 
     # Load the config file if present
@@ -73,6 +73,10 @@ def predict_fn(input_object, model, context):
 
     # Add a batch dimension
     image = image.unsqueeze(0)
+
+    # Move to same device as model
+    image = image.to(model.device)
+
     # pass through model
     mask = model(image)
     mask = mask.detach().squeeze().numpy()

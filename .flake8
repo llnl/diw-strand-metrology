@@ -1,0 +1,9 @@
+[flake8]
+# It's not bugs we are ignoring it's linting
+# E401 multiple imports on one line - some things are just unreasonable, I don't need a 50+ line header
+# E266: Because block comments are awesome and this is a foolish requirement
+# W503: line break before binary operator - conflicts with black standards and honestly is harder to read
+# increase max line length to 120 chars: This isn't the 1970s
+ignore=E401, E266, W503
+max-line-length=120
+exclude=.ipynb

@@ -1,6 +1,9 @@
 import pytorch_lightning as pl
 import torch
 import torchmetrics
+import wandb
+
+from torchvision.transforms.functional import to_pil_image
 
 from llnl_ml.model import get_model
 from llnl_ml.optimizer import get_optimizer
@@ -45,6 +48,9 @@ class SegmentationLightningModule(pl.LightningModule):
         self.jaccard_metric = torchmetrics.JaccardIndex(task="binary", threshold=0.5, ignore_index=0)
         self.dice_metric = torchmetrics.Dice(threshold=0.5)
 
+        # Aggregates the first 5 test images to be logged to wandb
+        self._test_log_images = []
+
     def forward(self, x, y: Optional[Any] = None):
         if y is not None:
             return self.model(x, y)
@@ -66,7 +72,8 @@ class SegmentationLightningModule(pl.LightningModule):
         self.log("train_loss", loss, on_step=True, sync_dist=True, prog_bar=True)
         return loss
 
-    def validation_step(self, batch, batch_idx):
+    # Helper functions used in val and test
+    def _get_eval_pred_and_mask(self, batch, batch_idx):
         image, targets = batch
         if isinstance(targets, (list, tuple)):
             # For each image's target, combine the individual components into a single mask
@@ -87,17 +94,14 @@ class SegmentationLightningModule(pl.LightningModule):
         else:
             pred_prob = torch.nn.functional.sigmoid(pred)
             pred_logits = pred
+        return image, mask, pred_prob, pred_logits
+
+    def validation_step(self, batch, batch_idx):
+        _, mask, pred_prob, pred_logits = self._get_eval_pred_and_mask(batch, batch_idx)
         loss = self.loss_fn(pred_logits, mask.to(pred_logits))
         self.log("val_loss", loss, on_step=False, on_epoch=True, sync_dist=True, prog_bar=True)
         # Metrics expect mask to be of type int, not float
         mask = mask.short()
-        if (pred_prob.device != mask.device) or (pred_prob.device != self.acc_metric.device):
-            print(f"Mismatch devices in Validation loop: ")
-            print(f"\t{pred.device = }")
-            print(f"\t{pred_prob.device = }")
-            print(f"\t{pred_logits.device = }")
-            print(f"\t{mask.device = }")
-            print(f"\t{self.acc_metric.device = }")
         self.acc_metric(pred_prob, mask)
         self.jaccard_metric(pred_prob, mask)
         self.dice_metric(pred_prob, mask)
@@ -106,26 +110,7 @@ class SegmentationLightningModule(pl.LightningModule):
         self.log("val_acc", self.acc_metric, on_step=False, on_epoch=True, prog_bar=True)
 
     def test_step(self, batch, batch_idx):
-        image, targets = batch
-        if isinstance(targets, (list, tuple)):
-            # For each image's target, combine the individual components into a single mask
-            mask = [target["masks"].sum(dim=0, keepdim=True) for target in targets]
-            # Concatenate
-            mask = torch.concatenate(mask, dim=0)
-        else:
-            mask = targets["masks"]
-        pred = self.model(image)
-        pred = pred.squeeze(dim=1)
-        # Determine if we have logits or probabilities
-        # If probabilities
-        if pred.min() >= 0 and pred.max() <= 1.0:
-            pred_prob = pred
-            # Convert to pseudo logits [-1, 1] for calculating loss
-            pred_logits = (pred - 0.5) * 2.0
-        # If we have logits
-        else:
-            pred_prob = torch.nn.functional.sigmoid(pred)
-            pred_logits = pred
+        image, mask, pred_prob, pred_logits = self._get_eval_pred_and_mask(batch, batch_idx)
         loss = self.loss_fn(pred_logits, mask.to(pred_logits))
         self.log("test_loss", loss, on_step=False, on_epoch=True, sync_dist=True, prog_bar=True)
         # Metrics expect mask to be of type int, not float
@@ -136,6 +121,33 @@ class SegmentationLightningModule(pl.LightningModule):
         self.log("test_dice", self.dice_metric, on_step=False, on_epoch=True, prog_bar=True)
         self.log("test_jaccard", self.jaccard_metric, on_step=False, on_epoch=True, prog_bar=True)
         self.log("test_acc", self.acc_metric, on_step=False, on_epoch=True, prog_bar=True)
+
+        # If this is one of the first 5 test images, save out the mask and image to wandb
+        if self.trainer.is_global_zero and len(self._test_log_images) < 5:
+            # Get up to the first 5 images and masks
+            for img, img_pred, gt_mask in zip(image, pred_prob, mask):
+                np_pred_mask = (img_pred > 0.5).short().cpu().numpy()
+                np_gt_mask = gt_mask.cpu().numpy()
+                pil_image = to_pil_image(img.cpu())
+                log_image = wandb.Image(
+                    pil_image,
+                    masks={
+                        "predictions": {"mask_data": np_pred_mask},
+                        "ground_truth": {"mask_data": np_gt_mask},
+                    },
+                )
+                self._test_log_images.append(log_image)
+                if len(self._test_log_images) >= 5:
+                    break
+
+    # Temporarily disabled until wandb logging hang issue resolved
+    # def on_test_epoch_end(self) -> None:
+    #     # Log the test images to the wandb logger directly
+    #     if self.trainer.is_global_zero:
+    #         wandb_logger = self.logger.experiment
+    #         wandb_logger.log({"test_images": self._test_log_images})
+    #         # Reset the _test_log_images
+    #         self._test_log_images = []
 
     def configure_optimizers(self) -> Any:
         optimizers, self._scheduler_needs_epoch = get_optimizer(
