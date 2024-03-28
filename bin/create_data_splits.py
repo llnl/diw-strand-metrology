@@ -135,7 +135,9 @@ def main(
     # Otherwise, save locally
     else:
         # Ensure directory exists
-        os.makedirs(os.path.dirname(split_file), exist_ok=True)
+        directory_path = os.path.dirname(split_file)
+        if directory_path:
+            os.makedirs(os.path.dirname(split_file), exist_ok=True)
         with open(split_file, "w") as fp:
             fp.write(split_string)
 
