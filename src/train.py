@@ -234,8 +234,6 @@ def main(
     logger.info("Starting training run with the following parameters:")
     logger.info(f"{locals()}")
 
-    wandb_logger = WandbLogger(entity="aqa_llnl", project=project_name, name=run_name)  # , config=vars(args))
-
     # Save input information important for inference later as a config.yaml file in the model output dir
     data_config = dict(
         model_name=model_name,
@@ -249,6 +247,34 @@ def main(
     )
     with open(os.path.join(model_dir, "config.yaml"), "w") as fp:
         yaml.dump(data_config, fp)
+
+    # Log all hyperparameters passed into the model
+    logged_config = data_config.update(
+        {
+            split_file: split_file,
+            train_count: train_count,
+            # model_params: model_params,
+            num_workers: num_workers,
+            batch_size: batch_size,
+            epochs: epochs,
+            learning_rate: learning_rate,
+            lr_schedular: lr_schedular,
+            use_zero: use_zero,
+            use_amp: use_amp,
+            val_image_size: val_image_size,
+            val_batch_size: val_batch_size,
+            test_image_size: test_image_size,
+            test_batch_size: test_batch_size,
+            use_random_resize: use_random_resize,
+            use_random_crop: use_random_crop,
+            use_random_rotation: use_random_rotation,
+            color_jitter: color_jitter,
+        }
+    )
+
+    wandb_logger = WandbLogger(
+        entity="aqa_llnl", project=project_name, name=run_name, config=logged_config
+    )  # , config=vars(args))
 
     # Get the number of GPUs available for training for use later
     num_gpus = torch.cuda.device_count()
@@ -348,7 +374,7 @@ def main(
     torch.distributed.destroy_process_group()
     # Run Testing on a single device
     if trainer.is_global_zero:
-        trainer = pl.Trainer(
+        tester = pl.Trainer(
             logger=wandb_logger,
             devices=1,
             num_nodes=1,
@@ -360,10 +386,9 @@ def main(
         # Load the best model checkpoint
         logger.info(f"Testing with best performing model parameters: \n\t{model_ckpt_callback.best_model_path}")
         # Run test using the best model weights path
-        test_results = trainer.test(
-            model=module, dataloaders=test_loader, ckpt_path=model_ckpt_callback.best_model_path
-        )
-        trainer.save_checkpoint(os.path.join(model_dir, "best.ckpt"), weights_only=True)
+        test_module = SegmentationLightningModule.load_from_checkpoint(model_ckpt_callback.best_model_path)
+        test_results = tester.test(model=test_module, dataloaders=test_loader)
+        tester.save_checkpoint(os.path.join(model_dir, "best.ckpt"), weights_only=True)
 
         # Save the test results in a yaml file in the output directory
         with open(os.path.join(output_data_dir, "test_results.yaml"), "w") as fp:

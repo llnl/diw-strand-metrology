@@ -1,4 +1,5 @@
 import json
+import math
 
 import cv2
 import torch
@@ -16,7 +17,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def model_fn(model_dir, context):
-    model = SegmentationLightningModule.load_from_checkpoint(os.path.join(model_dir, "best.ckpt"))
+    model = SegmentationLightningModule.load_from_checkpoint(os.path.join(model_dir, "last.ckpt"))
     model.to(device).eval()
 
     # Load the config file if present
@@ -65,6 +66,15 @@ def predict_fn(input_object, model, context):
         # Add a Channel dim to front
         image = image[:, :, np.newaxis]
 
+    if data_params.get("center_crop", False):
+        crop_size = data_params["center_crop_size"]
+        crop_offset = data_params["center_crop_offset"]
+        top = (image.shape[0] // 2 + crop_offset[0]) - math.floor(crop_size / 2)
+        bottom = (image.shape[0] // 2 + crop_offset[0]) + math.ceil(crop_size / 2)
+        left = (image.shape[1] // 2 + crop_offset[1]) - math.floor(crop_size / 2)
+        right = (image.shape[1] // 2 + crop_offset[1]) + math.ceil(crop_size / 2)
+        image = image[top:bottom, left:right]
+
     # Convert to torch tensor of correct shape and normalize
     image = image.astype(dtype=np.float32) / np.iinfo(image.dtype).max
 
@@ -73,10 +83,6 @@ def predict_fn(input_object, model, context):
 
     # Add a batch dimension
     image = image.unsqueeze(0)
-
-    # Move to same device as model
-    image = image.to(model.device)
-
     # pass through model
     mask = model(image)
     mask = mask.detach().squeeze().numpy()
