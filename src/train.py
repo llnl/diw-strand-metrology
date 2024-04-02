@@ -371,7 +371,8 @@ def main(
     trainer.fit(model=module, train_dataloaders=train_loader, val_dataloaders=val_loader, ckpt_path=resume_checkpoint)
 
     # Shut down process group if launched to ensure training doesn't hang
-    torch.distributed.destroy_process_group()
+    if strategy == "ddp":
+        torch.distributed.destroy_process_group()
     # Run Testing on a single device
     if trainer.is_global_zero:
         tester = pl.Trainer(
