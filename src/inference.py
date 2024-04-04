@@ -17,8 +17,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def model_fn(model_dir, context):
-    model_name = "best.ckpt" if os.path.exists(os.path.join(model_dir, "best.ckpt")) else "last.ckpt"
-    model = SegmentationLightningModule.load_from_checkpoint(os.path.join(model_dir, model_name))
+    model = SegmentationLightningModule.load_from_checkpoint(os.path.join(model_dir, "last.ckpt"))
     model.to(device).eval()
 
     # Load the config file if present
