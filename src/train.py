@@ -4,6 +4,7 @@ import os
 import pytorch_lightning as pl
 import torch
 import yaml
+from matplotlib import pyplot as plt
 
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import (
@@ -391,9 +392,39 @@ def main(
         test_results = tester.test(model=test_module, dataloaders=test_loader)
         tester.save_checkpoint(os.path.join(model_dir, "best.ckpt"), weights_only=True)
 
+        # Save the images here?
+        logger.info(f"Saving {len(test_module.test_log_images)}")
+        for idx, (img, gt_mask, pred_mask) in enumerate(test_module.test_log_images_raw):
+            save_test_result_image(img, gt_mask, pred_mask, os.path.join(output_data_dir, f"test_{idx}.png"))
+
+        # Try saving to wandb
+        logger.info("Saving images to wandb")
+        wandb_logger.experiment.log({"test_images": test_module.test_log_images})
+
         # Save the test results in a yaml file in the output directory
         with open(os.path.join(output_data_dir, "test_results.yaml"), "w") as fp:
             yaml.dump(test_results, fp)
+
+
+def save_test_result_image(image, gt_mask, pred_mask, fname):
+    fig_len = image.shape[0] / 100
+    fig, axs = plt.subplots(1, 4, figsize=(fig_len * 4, fig_len))
+    # Add titles
+    axs[0].set_title("Input Image")
+    axs[1].set_title("Mask")
+    axs[2].set_title("Raw Output")
+    axs[3].set_title("Thresholded Output")
+    axs[0].imshow(image, cmap="gray")
+    axs[0].set_axis_off()
+    axs[1].imshow(gt_mask, cmap="gray")
+    axs[1].set_axis_off()
+    axs[2].imshow(pred_mask)
+    axs[2].set_axis_off()
+    axs[3].imshow(pred_mask > 0.5, cmap="gray")
+    axs[3].set_axis_off()
+    fig.subplots_adjust(wspace=0, hspace=0)
+    plt.savefig(fname, bbox_inches="tight")
+    plt.close(fig)
 
 
 if __name__ == "__main__":
