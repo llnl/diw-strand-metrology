@@ -1,9 +1,12 @@
 import argparse
 import logging
 import os
+
+import boto3
 import pytorch_lightning as pl
 import torch
 import yaml
+from pathlib import Path
 from matplotlib import pyplot as plt
 
 from pytorch_lightning.loggers import TensorBoardLogger
@@ -91,6 +94,16 @@ def parse_args():
             "Used by spot instance training to allow for graceful start/resume cycles."
         ),
     )
+    parser.add_argument(
+        "--pretrained_weights",
+        type=str,
+        default=None,
+        help=(
+            "S3Uri or path to .ckpt file containing weights to load into model. "
+            "NOTE: Checkpoints in the checkpoints directory will override these weights when they "
+            "load for training resumption."
+        ),
+    )
     parser.add_argument("--num_workers", type=int, default=1, help="Number of workers for data loading")
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size for training")
     parser.add_argument("--epochs", type=int, default=1, help="Number of epochs for training")
@@ -159,6 +172,26 @@ def parse_args():
     return args, model_params
 
 
+def download_weights(s3_uri: str) -> str:
+    """
+    Checks if s3_uri is a s3 uri or a local path. If s3 uri, will download the file locally to a temp directory
+    and return the temp local path.
+
+    :param s3_uri: String of either local path or s3 uri (s3://bucket/path/to/file.ckpt)
+    :return: String of local weights location
+    """
+    if not s3_uri.startswith("s3://"):
+        return s3_uri
+
+    bucket, key = s3_uri.removeprefix("s3://").split("/", 1)
+
+    s3 = boto3.client("s3")
+    local_file = f"/tmp/{Path(s3_uri).name}"
+    s3.download_file(bucket, key, local_file)
+
+    return local_file
+
+
 def main(
     model_name: str,
     image_folder: str,
@@ -167,6 +200,7 @@ def main(
     tensorboard_dir: str,
     model_dir: str,
     checkpoint_dir: str = "/opt/ml/checkpoints",
+    pretrained_weights: Optional[str] = None,
     split_file: Optional[str] = None,
     train_count: int = -1,
     model_params: Optional[dict] = None,
@@ -202,6 +236,9 @@ def main(
     :param model_dir: Directory to save final model weights and the config file.
     :param checkpoint_dir: Directory to save intermediate training checkpoints. If directory not empty, will resume
         training from the 'last.ckpt' checkpoint in the folder.
+    :param pretrained_weights: S3 Uri or local path to a .ckpt file. Will load these weights into model prior to train.
+        NOTE: If checkpoints exists in checkpoint_dir for model resumption, the weights in checkpoint_dir will
+        overwrite the pretrained_weights. This is to enable model resumption on spot pausing.
     :param split_file: Path to json file with keys "train", "val" and "test". Each key has keys of "image" and "mask"
         with lists of filenames for that split. If not given, splits are generated randomly from all available data.
         Can be local path or S3 uri
@@ -298,6 +335,12 @@ def main(
     logger.info(f"Model: {module.model}")
     logger.info(f"The model has {count_parameters(module.model):,} trainable parameters.")
 
+    if pretrained_weights:
+        logger.info(f"Loading model weights from {pretrained_weights}")
+        pretrained_weights = download_weights(pretrained_weights)
+        checkpoint = torch.load(pretrained_weights)
+        module.load_state_dict(checkpoint["state_dict"])
+
     # Get the data loaders
     train_loader, val_loader, test_loader = get_data_loaders(
         image_folder=image_folder,
@@ -354,6 +397,11 @@ def main(
     resume_checkpoint = None
     if os.path.exists(os.path.join(checkpoint_dir, "last.ckpt")):
         resume_checkpoint = os.path.join(checkpoint_dir, "last.ckpt")
+        if pretrained_weights:
+            logger.warning(
+                f"Overwriting provided pretrained weights from {pretrained_weights} with "
+                f"training checkpoint {resume_checkpoint}"
+            )
 
     # Create Trainer
     trainer = pl.Trainer(
