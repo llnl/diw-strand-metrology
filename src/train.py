@@ -234,7 +234,7 @@ def main(
     logger.info("Starting training run with the following parameters:")
     logger.info(f"{locals()}")
 
-    wandb_logger = WandbLogger(entity="aqa_llnl", project=project_name, name=run_name)  # , config=vars(args))
+    wandb_logger = WandbLogger(entity="llnl-aex", project=project_name, name=run_name)  # , config=vars(args))
 
     # Save input information important for inference later as a config.yaml file in the model output dir
     data_config = dict(
@@ -344,8 +344,10 @@ def main(
     # Train the model
     trainer.fit(model=module, train_dataloaders=train_loader, val_dataloaders=val_loader, ckpt_path=resume_checkpoint)
 
-    # Shut down process group if launched to ensure training doesn't hang
-    torch.distributed.destroy_process_group()
+    # Shut down process group if launched to ensure training doesn't hang. 
+    if strategy == "ddp":
+        torch.distributed.destroy_process_group()
+
     # Run Testing on a single device
     if trainer.is_global_zero:
         trainer = pl.Trainer(
