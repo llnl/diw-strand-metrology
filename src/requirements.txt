@@ -13,3 +13,5 @@ torchmetrics
 wandb
 ipywidgets
 matplotlib
+pandas
+pyarrow
