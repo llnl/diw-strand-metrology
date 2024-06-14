@@ -49,7 +49,11 @@ class SegmentationLightningModule(pl.LightningModule):
         self.dice_metric = torchmetrics.Dice(threshold=0.5)
 
         # Aggregates the first 5 test images to be logged to wandb
-        self._test_log_images = []
+        self.test_log_images = list()
+        self.test_log_images_raw = list()
+
+        # Export test scores for individual files
+        self.test_image_metrics = list()
 
     def forward(self, x, y: Optional[Any] = None):
         if y is not None:
@@ -122,8 +126,26 @@ class SegmentationLightningModule(pl.LightningModule):
         self.log("test_jaccard", self.jaccard_metric, on_step=False, on_epoch=True, prog_bar=True)
         self.log("test_acc", self.acc_metric, on_step=False, on_epoch=True, prog_bar=True)
 
+        # Store scores for logging later
+        # To ensure a one to one mapping of metrics to images we will re-compute using the functional interface
+        if isinstance(batch[1], list):
+            image_names = [target["image_name"] for target in batch[1]]
+        else:
+            image_names = batch[1]["image_name"]
+
+        for img_name, img, img_pred, gt_mask in zip(image_names, image, pred_prob, mask):
+            self.test_image_metrics.append(
+                {
+                    "image_name": img_name,
+                    "dice": torchmetrics.functional.dice(img_pred, gt_mask).cpu().item(),
+                    "jaccard": torchmetrics.functional.classification.binary_jaccard_index(img_pred, gt_mask)
+                    .cpu()
+                    .item(),
+                    "acc": torchmetrics.functional.classification.binary_accuracy(img_pred, gt_mask).cpu().item(),
+                }
+            )
         # If this is one of the first 5 test images, save out the mask and image to wandb
-        if self.trainer.is_global_zero and len(self._test_log_images) < 5:
+        if self.trainer.is_global_zero and len(self.test_log_images) < 5:
             # Get up to the first 5 images and masks
             for img, img_pred, gt_mask in zip(image, pred_prob, mask):
                 np_pred_mask = (img_pred > 0.5).short().cpu().numpy()
@@ -136,18 +158,13 @@ class SegmentationLightningModule(pl.LightningModule):
                         "ground_truth": {"mask_data": np_gt_mask},
                     },
                 )
-                self._test_log_images.append(log_image)
-                if len(self._test_log_images) >= 5:
-                    break
+                self.test_log_images.append(log_image)
+                self.test_log_images_raw.append(
+                    (img.cpu().squeeze().numpy(), np_gt_mask, img_pred.cpu().squeeze().numpy())
+                )
 
-    # Temporarily disabled until wandb logging hang issue resolved
-    # def on_test_epoch_end(self) -> None:
-    #     # Log the test images to the wandb logger directly
-    #     if self.trainer.is_global_zero:
-    #         wandb_logger = self.logger.experiment
-    #         wandb_logger.log({"test_images": self._test_log_images})
-    #         # Reset the _test_log_images
-    #         self._test_log_images = []
+                if len(self.test_log_images) >= 5:
+                    break
 
     def configure_optimizers(self) -> Any:
         optimizers, self._scheduler_needs_epoch = get_optimizer(

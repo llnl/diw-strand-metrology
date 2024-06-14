@@ -1,9 +1,14 @@
 import argparse
 import logging
 import os
+
+import boto3
+import pandas as pd
 import pytorch_lightning as pl
 import torch
 import yaml
+from pathlib import Path
+from matplotlib import pyplot as plt
 
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import (
@@ -90,6 +95,16 @@ def parse_args():
             "Used by spot instance training to allow for graceful start/resume cycles."
         ),
     )
+    parser.add_argument(
+        "--pretrained_weights",
+        type=str,
+        default=None,
+        help=(
+            "S3Uri or path to .ckpt file containing weights to load into model. "
+            "NOTE: Checkpoints in the checkpoints directory will override these weights when they "
+            "load for training resumption."
+        ),
+    )
     parser.add_argument("--num_workers", type=int, default=1, help="Number of workers for data loading")
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size for training")
     parser.add_argument("--epochs", type=int, default=1, help="Number of epochs for training")
@@ -153,9 +168,38 @@ def parse_args():
         default="run_name2",
         help="  ",
     )
+    parser.add_argument(
+        "--metadata_file",
+        type=str,
+        default="",
+        help=(
+            "Filepath or S3Uri to metadata csv file containing image names and metadata fields. "
+            "If provided, will aggregate results by fields in csv, output to logs, and generate pandas dataframe."
+        ),
+    )
 
     args, model_params = parser.parse_known_args()
     return args, model_params
+
+
+def download_s3_uri(s3_uri: str) -> str:
+    """
+    Checks if s3_uri is a s3 uri or a local path. If s3 uri, will download the file locally to a temp directory
+    and return the temp local path.
+
+    :param s3_uri: String of either local path or s3 uri (s3://bucket/path/to/file.ckpt)
+    :return: String of local weights location
+    """
+    if not s3_uri.startswith("s3://"):
+        return s3_uri
+
+    bucket, key = s3_uri.removeprefix("s3://").split("/", 1)
+
+    s3 = boto3.client("s3")
+    local_file = f"/tmp/{Path(s3_uri).name}"
+    s3.download_file(bucket, key, local_file)
+
+    return local_file
 
 
 def main(
@@ -166,6 +210,7 @@ def main(
     tensorboard_dir: str,
     model_dir: str,
     checkpoint_dir: str = "/opt/ml/checkpoints",
+    pretrained_weights: Optional[str] = None,
     split_file: Optional[str] = None,
     train_count: int = -1,
     model_params: Optional[dict] = None,
@@ -191,6 +236,7 @@ def main(
     center_crop_offset: Tuple[int] = (-60, -50),
     project_name: str = "project_name",
     run_name: str = "run_name",
+    metadata_file: str = None,
 ) -> None:
     """
     :param model_name: Name of model to train
@@ -201,6 +247,9 @@ def main(
     :param model_dir: Directory to save final model weights and the config file.
     :param checkpoint_dir: Directory to save intermediate training checkpoints. If directory not empty, will resume
         training from the 'last.ckpt' checkpoint in the folder.
+    :param pretrained_weights: S3 Uri or local path to a .ckpt file. Will load these weights into model prior to train.
+        NOTE: If checkpoints exists in checkpoint_dir for model resumption, the weights in checkpoint_dir will
+        overwrite the pretrained_weights. This is to enable model resumption on spot pausing.
     :param split_file: Path to json file with keys "train", "val" and "test". Each key has keys of "image" and "mask"
         with lists of filenames for that split. If not given, splits are generated randomly from all available data.
         Can be local path or S3 uri
@@ -230,6 +279,7 @@ def main(
     :param center_crop_offset: Offsets the center of the crop by [Row, Col] or [Height, Width]
     :param project_name: Name of WandB project
     :param run_name: Run name for tracking in WandB project
+    :param metadata_file: Filepath or S3Uri to metadata csv file.
     """
     logger.info("Starting training run with the following parameters:")
     logger.info(f"{locals()}")
@@ -273,7 +323,12 @@ def main(
     )
 
     wandb_logger = WandbLogger(
-        entity="aqa_llnl", project=project_name, name=run_name, config=logged_config
+        # entity="aqa_llnl", project=project_name, name=run_name, config=logged_config
+        offline=True,
+        project=project_name,
+        name=run_name,
+        config=logged_config,
+        save_dir=output_data_dir,
     )  # , config=vars(args))
 
     # Get the number of GPUs available for training for use later
@@ -296,6 +351,15 @@ def main(
 
     logger.info(f"Model: {module.model}")
     logger.info(f"The model has {count_parameters(module.model):,} trainable parameters.")
+
+    if pretrained_weights:
+        logger.info(f"Loading model weights from {pretrained_weights}")
+        pretrained_weights = download_s3_uri(pretrained_weights)
+        checkpoint = torch.load(pretrained_weights)
+        module.load_state_dict(checkpoint["state_dict"])
+
+    # Load in metadata if available
+    metadata = load_metadata(metadata_file)
 
     # Get the data loaders
     train_loader, val_loader, test_loader = get_data_loaders(
@@ -353,6 +417,11 @@ def main(
     resume_checkpoint = None
     if os.path.exists(os.path.join(checkpoint_dir, "last.ckpt")):
         resume_checkpoint = os.path.join(checkpoint_dir, "last.ckpt")
+        if pretrained_weights:
+            logger.warning(
+                f"Overwriting provided pretrained weights from {pretrained_weights} with "
+                f"training checkpoint {resume_checkpoint}"
+            )
 
     # Create Trainer
     trainer = pl.Trainer(
@@ -391,9 +460,101 @@ def main(
         test_results = tester.test(model=test_module, dataloaders=test_loader)
         tester.save_checkpoint(os.path.join(model_dir, "best.ckpt"), weights_only=True)
 
+        # Save the images to the output data directory
+        logger.info(f"Saving {len(test_module.test_log_images)}")
+        for idx, (img, gt_mask, pred_mask) in enumerate(test_module.test_log_images_raw):
+            save_test_result_image(img, gt_mask, pred_mask, os.path.join(output_data_dir, f"test_{idx}.png"))
+
+        # Save the images to wandb directly
+        logger.info("Saving images to wandb")
+        wandb_logger.experiment.log({"test_images": test_module.test_log_images})
+
+        per_image_metrics = pd.DataFrame(test_module.test_image_metrics)
+        # If metadata was provided, append the metadata to the output metrics
+        # and generate per metadata results
+        if metadata is not None:
+            # Join the metadata dataframe to the per image metrics
+            per_image_metrics = pd.merge(per_image_metrics, metadata, on="image_name", how="left")
+            # Get the metadata column names
+            meta_columns = set(metadata.columns) - {"S3 URI", "image_name"}
+            # For each column
+            for column in meta_columns:
+                column_group = column if column_is_discrete(metadata, column) else pd.cut(metadata[column], bins=10)
+                grouped_mean = per_image_metrics.groupby(column_group)[["acc", "dice", "jaccard"]].mean()
+                for idx in grouped_mean.index:
+                    for col in grouped_mean.columns:
+                        wandb_logger.experiment.log({f"test_{col}_{column}_{idx}": grouped_mean.loc[idx, col]})
+
+        per_image_metrics.to_parquet(path=os.path.join(output_data_dir, "per_image_metrics.parquet"))
+
         # Save the test results in a yaml file in the output directory
         with open(os.path.join(output_data_dir, "test_results.yaml"), "w") as fp:
             yaml.dump(test_results, fp)
+
+
+def load_metadata(metadata_file: str) -> Optional[pd.DataFrame]:
+    """
+    Loads the given metadata file from the path and returns it as a pandas dataframe.
+
+    :param metadata_file: Local file path or s3 uri to metadata file (csv or parquet format)
+    :return:
+        DataFrame containing the metadata
+    """
+    if metadata_file is None:
+        return None
+
+    metadata_file = download_s3_uri(metadata_file)
+    if metadata_file.endswith("csv"):
+        metadata = pd.read_csv(metadata_file)
+    elif metadata_file.endswith("parquet"):
+        metadata = pd.read_parquet(metadata_file)
+    else:
+        raise ValueError(
+            f"Expect metadata to be either CSV or Parquet format. "
+            f"File given ends with {os.path.splitext(metadata_file)[-1]}"
+        )
+
+    # Add the image basename as column to the dataframe for easier reference
+    s3_uris = metadata["S3 URI"]
+    image_names = [os.path.basename(uri).strip() for uri in s3_uris]
+
+    metadata["image_name"] = image_names
+
+    return metadata
+
+
+def column_is_discrete(dataframe: pd.DataFrame, column: str, heuristic_percent: float = 0.8) -> bool:
+    """
+    Heuristic to determine if the column contains continuous or discrete values
+    :param dataframe: DataFrame with desired data
+    :param column: Name of the column to test
+    :param heuristic_percent: If this percent of values are unique, consider the column continuous
+    :return: Returns True if column appears to be discrete, False if continuous
+    """
+    if dataframe[column].dtype == object:
+        return True
+    return (dataframe[column].nunique() / len(dataframe)) < heuristic_percent
+
+
+def save_test_result_image(image, gt_mask, pred_mask, fname):
+    fig_len = image.shape[0] / 100
+    fig, axs = plt.subplots(1, 4, figsize=(fig_len * 4, fig_len))
+    # Add titles
+    axs[0].set_title("Input Image")
+    axs[1].set_title("Mask")
+    axs[2].set_title("Raw Output")
+    axs[3].set_title("Thresholded Output")
+    axs[0].imshow(image, cmap="gray")
+    axs[0].set_axis_off()
+    axs[1].imshow(gt_mask, cmap="gray")
+    axs[1].set_axis_off()
+    axs[2].imshow(pred_mask)
+    axs[2].set_axis_off()
+    axs[3].imshow(pred_mask > 0.5, cmap="gray")
+    axs[3].set_axis_off()
+    fig.subplots_adjust(wspace=0, hspace=0)
+    plt.savefig(fname, bbox_inches="tight")
+    plt.close(fig)
 
 
 if __name__ == "__main__":

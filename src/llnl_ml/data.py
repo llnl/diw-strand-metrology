@@ -120,7 +120,7 @@ class SegmentationDataset(Dataset):
         # on both the image and targets (masks and boxes).
         # TVImage and TVMask are both subclasses of torch.Tensor and convert from numpy to torch tensor
         image = to_image_tensor(img)
-        targets = {"masks": TVMask(mask)}
+        targets = {"image_name": os.path.basename(self.image_paths[idx]).strip(), "masks": TVMask(mask)}
 
         if self.include_bbox:
             # To support TorchVision and Timm/Transformer based models, also create a bounding box and label targets
