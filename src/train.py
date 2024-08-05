@@ -494,7 +494,7 @@ def load_metadata(metadata_file: str) -> Optional[pd.DataFrame]:
     :return:
         DataFrame containing the metadata
     """
-    if metadata_file is None:
+    if not metadata_file:
         return None
 
     metadata_file = download_s3_uri(metadata_file)
