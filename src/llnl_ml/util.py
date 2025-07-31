@@ -1,8 +1,48 @@
 import argparse
 import base64
+import io
 import json
+import numpy as np
 import zlib
+
 from typing import Union, Callable, Any, List
+from PIL import Image
+
+
+def numpy_to_image_bytes(numpy_array: np.ndarray, format="PNG") -> bytes:
+    """Convert a numpy image to encoded image format
+
+    :param numpy_array: Numpy array of shape [H, W] or [H, W, 3]
+    :param format: Image format to save bytes as. Default PNG
+
+    :return: Encoded bytes of the image in the desired format
+    """
+    # Convert numpy array to PIL image
+    image = Image.fromarray(numpy_array)
+
+    # Create an in-memory bytes buffer
+    buffer = io.BytesIO()
+
+    # Save the image to the buffer
+    image.save(buffer, format=format)
+    return buffer.getvalue()
+
+
+def image_bytes_to_numpy(image_bytes: bytes) -> np.ndarray:
+    """Loads in memory encoded image to a numpy array
+
+    :param image_bytes: The JPEG/PNG encoded image bytes
+    :return: Numpy array of uncompressed image
+    """
+    # Create in-memory bytes buffer
+    buffer = io.BytesIO(image_bytes)
+
+    # Open the image from the buffer
+    image = Image.open(buffer)
+
+    # Convert to numpy array
+    numpy_array = np.array(image)
+    return numpy_array
 
 
 def encode_image(image_raw: bytes, compress: bool = False) -> str:
