@@ -79,7 +79,12 @@ class SegmentationDataset(Dataset):
         # Use opencv to read in the images as it handles int16 images natively PIL does not
         img = cv2.imread(self.image_paths[idx], cv2.IMREAD_ANYDEPTH | img_mode)
         mask = cv2.imread(self.mask_paths[idx], cv2.IMREAD_ANYDEPTH | cv2.IMREAD_ANYCOLOR)
+        if np.max(mask)==255 and np.min(mask)==112:
+            mask[mask==112]=0
+            mask[mask==255]=1
 
+        print( 'image fn: {}, {}'.format(self.image_paths[idx], img.shape) )
+        print( 'mask fn: {}, {}, max: {}, min: {}'.format(self.mask_paths[idx], mask.shape, np.max(mask), np.min(mask)) )
         # If we read image in as COLOR, opencv reads as BGR, convert to RGB
         if img_mode == cv2.IMREAD_COLOR:
             img = img[:, :, ::-1]

@@ -5,8 +5,8 @@ import json
 import numpy as np
 import zlib
 
-from PIL import Image
 from typing import Union, Callable, Any, List
+from PIL import Image
 
 
 def numpy_to_image_bytes(numpy_array: np.ndarray, format="PNG") -> bytes:
