@@ -1,3 +1,4 @@
+import boto3
 import json
 import logging
 import math
@@ -20,58 +21,32 @@ JSON_CONTENT_TYPE = "application/json"
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-class SageMakerLogger:
-    def __init__(self, name=__name__):
-        self.logger = logging.getLogger(name)
-        self._setup_logging()
-
-    def _setup_logging(self):
-        # Remove existing handlers
-        self.logger.handlers.clear()
-
-        # Create handlers
-        stdout_handler = logging.StreamHandler(sys.stdout)
-
-        # Create formatter
-        formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-
-        # Set formatters
-        stdout_handler.setFormatter(formatter)
-
-        # Add handlers
-        self.logger.addHandler(stdout_handler)
-
-        # Set level
-        self.logger.setLevel(logging.INFO)
-
-    def exception(self, msg, *args, **kwargs):
-        self.logger.exception(msg, *args, **kwargs)
-        self._flush()
-
-    def error(self, msg, *args, **kwargs):
-        self.logger.error(msg, *args, **kwargs)
-        self._flush()
-
-    def info(self, msg, *args, **kwargs):
-        self.logger.info(msg, *args, **kwargs)
-        self._flush()
-
-    def warning(self, msg, *args, **kwargs):
-        self.logger.warning(msg, *args, **kwargs)
-        self._flush()
-
-    def _flush(self):
-        sys.stdout.flush()
-
-
-logger = SageMakerLogger("llnl_inference")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    stream=sys.stdout,
+)
+logger = logging.getLogger(__name__)
 
 logger.info(f"Python version: {sys.version}")
 logger.info(f"PyTorch version: {torch.__version__}")
 logger.info(f"CUDA available: {torch.cuda.is_available()}")
 if torch.cuda.is_available():
-    logger.info(f"CUDA version: {torch.version.cuda}")
+    logger.info(f"CUDA version: {torch.version.cuda}") 
     logger.info(f"GPU device: {torch.cuda.get_device_name(0)}")
+
+
+def get_s3_object(s3_resource, s3_uri: str):
+    try:  # Add this try
+        bucket, key = s3_uri.replace("s3://", "").split("/", 1)
+        try:
+            obj = s3_resource.Object(bucket, key).get()
+            return obj["Body"].read()
+        except s3_resource.meta.client.exceptions.NoSuchKey:
+            return None
+    except Exception as e:
+        logger.exception(e)  # log the exception with a traceback for debugging
+        raise (e)  # Reraise the error so the function fails
 
 
 @contextmanager
@@ -92,6 +67,8 @@ def model_fn(model_dir, context):
 
         model = SegmentationLightningModule.load_from_checkpoint(os.path.join(model_dir, model_name))
         model.to(device).eval()
+
+        logger.info(f"Model loaded successfully on to device {device}")
 
         # Load the config file if present
         if os.path.exists(os.path.join(model_dir, "config.yaml")):
@@ -126,10 +103,17 @@ def input_fn(serialized_input_data, content_type=JSON_CONTENT_TYPE):
         if content_type == JSON_CONTENT_TYPE:
             body = json.loads(serialized_input_data)
             if isinstance(body, dict):
-                encoded_image_str = body["input"]
+                if "input" in body:
+                    image_bytes = decode_image(body["input"])
+                elif "image" in body:
+                    s3_resource = boto3.resource("s3")
+                    image_bytes = get_s3_object(s3_resource, body["image"])
+                    if image_bytes is None:
+                        raise ValueError(f"Image not found in S3: {body['image']}")
+                else:
+                    raise ValueError(f"Invalid input format. {body.keys()} given.")
             else:
-                encoded_image_str = body
-            image_bytes = decode_image(encoded_image_str)
+                image_bytes = decode_image(body)
         elif content_type == "application/x-image":
             image_bytes = serialized_input_data
         else:
