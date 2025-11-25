@@ -2,8 +2,6 @@ from typing import Any, Optional
 
 import torch
 from timm.scheduler import CosineLRScheduler
-from torch.distributed.optim import ZeroRedundancyOptimizer
-
 
 def get_optimizer(
     parameters: Any,
@@ -13,10 +11,7 @@ def get_optimizer(
     max_epochs: int = 10,
     use_zero_grad: bool = False,
 ):
-    if use_zero_grad:
-        optimizer = ZeroRedundancyOptimizer(parameters, optimizer_class=torch.optim.Adam, lr=lr)
-    else:
-        optimizer = torch.optim.Adam(parameters, lr=lr)
+    optimizer = torch.optim.Adam(parameters, lr=lr)
 
     scheduler_needs_epoch = False
     if scheduler_type == "plateau":

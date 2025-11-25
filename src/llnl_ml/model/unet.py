@@ -51,7 +51,11 @@ class UNet(nn.Module):
 
         for up, x_prior in zip(self.up_conv, reversed(x_down)):
             x = up(x, x_prior)
-        return self.final_conv(x)
+        
+        out = self.final_conv(x)
+        
+        return out
+
 
 
 class UNetSmall(nn.Module):
@@ -183,6 +187,6 @@ class UpConv(torch.nn.Module):
 
     def forward(self, x1, x2):
         x1 = self.up(x1)
-        x = torch.cat([x1, x2], dim=1) 
+        x = torch.cat([x1, x2], dim=1)
         x = self.conv(x)
         return x

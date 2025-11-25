@@ -1,6 +1,8 @@
-torch>=2.0.1
+torch>=2.3.1
 torchvision>=0.15.2
-torchmetrics==1.6.1
+torchmetrics>=1.7.0
+mlflow==3.0
+sagemaker-mlflow
 scikit-learn
 pillow
 opencv-python
@@ -10,9 +12,10 @@ lightning
 tensorboard
 timm
 sagemaker
-torchmetrics
-wandb
 ipywidgets
 matplotlib
 pandas
 pyarrow
+# additional system level logging metrics
+psutil
+nvidia-ml-py

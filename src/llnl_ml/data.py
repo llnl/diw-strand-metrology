@@ -79,12 +79,11 @@ class SegmentationDataset(Dataset):
         # Use opencv to read in the images as it handles int16 images natively PIL does not
         img = cv2.imread(self.image_paths[idx], cv2.IMREAD_ANYDEPTH | img_mode)
         mask = cv2.imread(self.mask_paths[idx], cv2.IMREAD_ANYDEPTH | cv2.IMREAD_ANYCOLOR)
+
         if np.max(mask)==255 and np.min(mask)==112:
             mask[mask==112]=0
             mask[mask==255]=1
 
-        print( 'image fn: {}, {}'.format(self.image_paths[idx], img.shape) )
-        print( 'mask fn: {}, {}, max: {}, min: {}'.format(self.mask_paths[idx], mask.shape, np.max(mask), np.min(mask)) )
         # If we read image in as COLOR, opencv reads as BGR, convert to RGB
         if img_mode == cv2.IMREAD_COLOR:
             img = img[:, :, ::-1]
@@ -119,6 +118,10 @@ class SegmentationDataset(Dataset):
             right = (img.shape[1] // 2 + self.crop_offset[1]) + math.ceil(self.crop_size / 2)
             img = img[top:bottom, left:right]
             mask = mask[top:bottom, left:right]
+
+        # Ensure the channel dimension remains for consistency with downstream updates
+        if mask.ndim == 2:
+            mask = np.expand_dims(mask, axis=0)
 
         # Return a tuple of Image and Targets where targets is a dict containing masks, boxes, and labels
         # This conforms to TorchVisions expected format for new v2 transforms to enable geometric transforms
@@ -295,6 +298,10 @@ def get_data_loaders(
     collate_fn = list_collate_fn if needs_boxes else default_collate
     val_batch_size = val_batch_size if val_batch_size is not None else batch_size
     test_batch_size = test_batch_size if test_batch_size is not None else val_batch_size
+    
+    # Configure DataLoader to minimize memory usage during DDP initialization
+    # pin_memory=False reduces memory pressure during setup
+    # prefetch_factor=2 (default) limits prefetching when num_workers > 0
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
@@ -302,12 +309,26 @@ def get_data_loaders(
         num_workers=num_workers,
         drop_last=True,
         collate_fn=collate_fn,
+        pin_memory=False,  # Disable to reduce memory during DDP init
+        prefetch_factor=2 if num_workers > 0 else None,
     )
     val_loader = DataLoader(
-        val_dataset, batch_size=val_batch_size, shuffle=False, num_workers=num_workers, collate_fn=collate_fn
+        val_dataset,
+        batch_size=val_batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        collate_fn=collate_fn,
+        pin_memory=False,
+        prefetch_factor=2 if num_workers > 0 else None,
     )
     test_loader = DataLoader(
-        test_dataset, batch_size=test_batch_size, shuffle=False, num_workers=num_workers, collate_fn=collate_fn
+        test_dataset,
+        batch_size=test_batch_size,
+        shuffle=False,
+        num_workers=0,
+        collate_fn=collate_fn,
+        pin_memory=False,
+        prefetch_factor=None,
     )
 
     return train_loader, val_loader, test_loader

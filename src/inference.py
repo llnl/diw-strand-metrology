@@ -158,7 +158,7 @@ def predict_fn(input_object, model, context):
             image = image.unsqueeze(0).to(device)
             # pass through model
             with torch.no_grad():
-                mask = model(image)
+                mask, _ = model(image)
             mask = mask.detach().squeeze().cpu().numpy()
             mask = mask > data_params["THRESHOLD"]
             # return mask

@@ -9,6 +9,7 @@ import torch
 import yaml
 from pathlib import Path
 from matplotlib import pyplot as plt
+import mlflow
 
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import (
@@ -19,11 +20,13 @@ from pytorch_lightning.callbacks import (
 from typing import Optional, Tuple
 
 from llnl_ml.model import count_parameters
+from llnl_ml.model.util import get_training_data_sources, get_sagemaker_resource_config
 from llnl_ml.data import get_data_loaders
 from llnl_ml.lightning import SegmentationLightningModule
 from llnl_ml.util import str2bool, str2intlist
+from llnl_ml.dataset import log_dataset_to_mlflow
 
-from pytorch_lightning.loggers import WandbLogger
+from pytorch_lightning.loggers import MLFlowLogger
 
 
 logging.basicConfig(level=logging.INFO)
@@ -122,8 +125,7 @@ def parse_args():
         default="grayscale",
         help="Image mode for reading images (RGB or grayscale)",
     )
-    parser.add_argument("--use_zero", type=str2bool, default=False, help="Enable ZeRO optimizer")
-    parser.add_argument("--use_amp", type=str2bool, default=False, help="Enable Mixed Precision")
+    parser.add_argument("--precision", type=str, default="16-mixed", help="Training precision to use for model.")
     parser.add_argument("--use_random_resize", type=str2bool, default=False, help="Use random resized crops")
     parser.add_argument(
         "--use_random_crop",
@@ -160,13 +162,13 @@ def parse_args():
         "--project_name",
         type=str,
         default="project_name2",
-        help="  ",
+        help="Name of the MLFlow experiment for organizing related runs",
     )
     parser.add_argument(
         "--run_name",
         type=str,
         default="run_name2",
-        help="  ",
+        help="Name of the specific MLFlow run for tracking this training execution",
     )
     parser.add_argument(
         "--metadata_file",
@@ -220,8 +222,7 @@ def main(
     learning_rate: float = 1e-3,
     lr_schedular: str = "cosine_warmup",
     image_mode: str = "L",
-    use_zero: bool = False,
-    use_amp: bool = False,
+    precision: str = "16-mixed",
     image_size: int = 512,
     val_image_size: int = None,
     val_batch_size: int = None,
@@ -236,7 +237,7 @@ def main(
     center_crop_offset: Tuple[int] = (-60, -50),
     project_name: str = "project_name",
     run_name: str = "run_name",
-    metadata_file: str = None,
+    metadata_file: str = "",
 ) -> None:
     """
     :param model_name: Name of model to train
@@ -262,8 +263,7 @@ def main(
     :param learning_rate: Base learning rate for optimization
     :param lr_schedular: Learning Schedular type, default is cosine with warmup "cosine_warmup"
     :param image_mode: Mode to load images in either RGB or grayscale
-    :param use_zero: Uses the ZeroGradient wrapper for efficient multi-gpu optimization
-    :param use_amp: If true, use Mixed FP16 precision for training
+    :param precision: Precision value to use with lightning trainer. Default 16-mixed.
     :param color_jitter: Float of amount of color jitter to apply as training augmentation
     :param use_random_rotation: If true, applies random rotations as training augmentation
     :param use_random_resize: If true, applies RandomResizedCrop transform as training augmentation
@@ -277,14 +277,26 @@ def main(
     :param center_crop: If True, takes a center crop of the image and mask prior to transforms
     :param center_crop_size: Size of the center crop
     :param center_crop_offset: Offsets the center of the crop by [Row, Col] or [Height, Width]
-    :param project_name: Name of WandB project
-    :param run_name: Run name for tracking in WandB project
+    :param project_name: Name of the MLFlow experiment for organizing related runs
+    :param run_name: Name of the specific MLFlow run for tracking this training execution
     :param metadata_file: Filepath or S3Uri to metadata csv file.
     """
-    logger.info("Starting training run with the following parameters:")
-    logger.info(f"{locals()}")
+    # Determine if this is the main process (for logging)
+    # In non-distributed mode, this will always be True
+    is_main_process = int(os.environ.get("LOCAL_RANK", 0)) == 0
+    
+    if is_main_process:
+        logger.info("Starting training run with the following parameters:")
+        logger.info(f"{locals()}")
 
-    wandb_logger = WandbLogger(entity="llnl-aex", project=project_name, name=run_name)  # , config=vars(args))
+    # Get training data sources (S3 URIs) using hybrid approach
+    training_data_info = get_training_data_sources()
+    resource_config = get_sagemaker_resource_config()
+    
+    if is_main_process and resource_config:
+        current_host = resource_config.get('current_host', 'unknown')
+        hosts = resource_config.get('hosts', [])
+        logger.info(f"SageMaker Resource Config: Host {current_host} of {hosts}")
 
     # Save input information important for inference later as a config.yaml file in the model output dir
     data_config = dict(
@@ -300,32 +312,66 @@ def main(
     with open(os.path.join(model_dir, "config.yaml"), "w") as fp:
         yaml.dump(data_config, fp)
 
+    # Ensure output directory exists for MLFlow tracking
+    os.makedirs(output_data_dir, exist_ok=True)
+
     # Log all hyperparameters passed into the model
-    logged_config = data_config.update(
-        {
-            split_file: split_file,
-            train_count: train_count,
-            # model_params: model_params,
-            num_workers: num_workers,
-            batch_size: batch_size,
-            epochs: epochs,
-            learning_rate: learning_rate,
-            lr_schedular: lr_schedular,
-            use_zero: use_zero,
-            use_amp: use_amp,
-            val_image_size: val_image_size,
-            val_batch_size: val_batch_size,
-            test_image_size: test_image_size,
-            test_batch_size: test_batch_size,
-            use_random_resize: use_random_resize,
-            use_random_crop: use_random_crop,
-            use_random_rotation: use_random_rotation,
-            color_jitter: color_jitter,
-        }
-    )
+    logged_config = {
+        "split_file": split_file,
+        "train_count": train_count,
+        "num_workers": num_workers,
+        "batch_size": batch_size,
+        "epochs": epochs,
+        "learning_rate": learning_rate,
+        "lr_schedular": lr_schedular,
+        "precision": precision,
+        "val_image_size": val_image_size,
+        "val_batch_size": val_batch_size,
+        "test_image_size": test_image_size,
+        "test_batch_size": test_batch_size,
+        "use_random_resize": use_random_resize,
+        "use_random_crop": use_random_crop,
+        "use_random_rotation": use_random_rotation,
+        "color_jitter": color_jitter,
+    }
+    logged_config.update(data_config)
+    
+    # Add training data source metadata to logged config for MLFlow tracking
+    if training_data_info.get('input_data_config'):
+        # Add SageMaker job metadata if available
+        if training_data_info.get('training_job_name'):
+            logged_config['sagemaker_training_job_name'] = training_data_info['training_job_name']
+        if training_data_info.get('training_job_arn'):
+            logged_config['sagemaker_training_job_arn'] = training_data_info['training_job_arn']
+        if training_data_info.get('instance_type'):
+            logged_config['sagemaker_instance_type'] = training_data_info['instance_type']
+        if training_data_info.get('instance_count'):
+            logged_config['sagemaker_instance_count'] = training_data_info['instance_count']
+    
+    if resource_config:
+        logged_config['sagemaker_current_host'] = resource_config.get('current_host', 'unknown')
+        logged_config['sagemaker_hosts'] = resource_config.get('hosts', [])
 
     # Get the number of GPUs available for training for use later
     num_gpus = torch.cuda.device_count()
+    
+    # Initialize MLFlow logger with proper error handling
+    # For DDP, delay initialization until after strategy setup to avoid serialization issues
+    mlflow_tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", f"file://{output_data_dir}/mlruns")
+    mlflow_logger = MLFlowLogger(
+        experiment_name=project_name,
+        run_name=run_name,
+        tracking_uri=mlflow_tracking_uri,
+        log_model=True,
+    )
+
+    if is_main_process:
+        logger.info(f"MLFlow Tracking URI: {mlflow_tracking_uri}")
+        logger.info(f"[-] {mlflow_logger._experiment_name} - {mlflow_logger._run_name} - {mlflow_logger.run_id}")
+        logger.info(f"Number of GPUs detected: {num_gpus}")
+
+    # Store config for later logging
+    hyperparams_to_log = logged_config
 
     # Load the Model
     # TODO: Add init params to adjust UNet shape
@@ -338,21 +384,19 @@ def main(
         input_channels=input_channels,
         output_channels=1,
         lr=learning_rate,
-        use_zero_grad=use_zero and num_gpus > 1,
         schedular_type=lr_schedular,
     )
 
-    logger.info(f"Model: {module.model}")
-    logger.info(f"The model has {count_parameters(module.model):,} trainable parameters.")
+    if is_main_process:
+        logger.info(f"Model: {module.model}")
+        logger.info(f"The model has {count_parameters(module.model):,} trainable parameters.")
 
     if pretrained_weights:
-        logger.info(f"Loading model weights from {pretrained_weights}")
+        if is_main_process:
+            logger.info(f"Loading model weights from {pretrained_weights}")
         pretrained_weights = download_s3_uri(pretrained_weights)
         checkpoint = torch.load(pretrained_weights)
         module.load_state_dict(checkpoint["state_dict"])
-
-    # Load in metadata if available
-    metadata = load_metadata(metadata_file)
 
     # Get the data loaders
     train_loader, val_loader, test_loader = get_data_loaders(
@@ -377,10 +421,32 @@ def main(
         needs_boxes=module.model.needs_boxes,
     )
 
+    # Log dataset information to MLFlow
+    # This is done after data loaders are created to enable fallback split extraction
+    if is_main_process:
+        dataset_logged = log_dataset_to_mlflow(
+            training_data_info=training_data_info,
+            split_file=split_file,
+            mlflow_logger=mlflow_logger,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            test_loader=test_loader,
+            image_folder=image_folder,
+            mask_folder=mask_folder
+        )
+        if dataset_logged:
+            logger.info("Dataset tracking completed successfully")
+        else:
+            logger.info("Dataset tracking was skipped or failed - training will continue")
+
+    # Load in metadata if available
+    metadata = load_metadata(metadata_file)
+
     # Create callbacks
+    os.makedirs(checkpoint_dir, exist_ok=True)
     model_ckpt_callback = ModelCheckpoint(
         dirpath=checkpoint_dir,
-        monitor="val_loss",
+        monitor="val_total_loss",
         mode="min",
         filename="{epoch:02d}-{val_loss:.3f}",
         every_n_epochs=1,
@@ -395,10 +461,8 @@ def main(
         model_ckpt_callback,
     ]
 
-    # Create loggers
-    loggers = [TensorBoardLogger(tensorboard_dir, name="tensorboard")]
-
     # Create Training Strategy
+    # Use DDPStrategy with find_unused_parameters=False to reduce memory overhead
     if num_gpus > 0:
         strategy = "ddp" if num_gpus > 1 else "auto"
         accelerator = "gpu"
@@ -406,63 +470,93 @@ def main(
         strategy = "auto"
         accelerator = "cpu"
 
+    if is_main_process:
+        logger.info(f"Training strategy: {strategy}")
+        logger.info(f"Accelerator: {accelerator}")
+
     # See if prior run exists
     resume_checkpoint = None
     if os.path.exists(os.path.join(checkpoint_dir, "last.ckpt")):
         resume_checkpoint = os.path.join(checkpoint_dir, "last.ckpt")
-        if pretrained_weights:
+        if pretrained_weights and is_main_process:
             logger.warning(
                 f"Overwriting provided pretrained weights from {pretrained_weights} with "
                 f"training checkpoint {resume_checkpoint}"
             )
 
     # Create Trainer
+    # Use gradient accumulation to achieve larger effective batch size without OOM
+    # With batch_size=2, 8 GPUs, and accumulate=2: effective_batch = 2 * 8 * 2 = 32
     trainer = pl.Trainer(
         max_epochs=epochs,
         accelerator=accelerator,
         devices=max(num_gpus, 1),
         strategy=strategy,
         default_root_dir=output_data_dir,
-        logger=wandb_logger,
+        logger=mlflow_logger,
         callbacks=callbacks,
-        precision="16-mixed" if use_amp else 32,
+        precision=precision,
         log_every_n_steps=10,
+        accumulate_grad_batches=2,  # Accumulate gradients to reduce memory pressure
     )
 
     # Train the model
     trainer.fit(model=module, train_dataloaders=train_loader, val_dataloaders=val_loader, ckpt_path=resume_checkpoint)
 
-    # Shut down process group if launched to ensure training doesn't hang.
-    if strategy == "ddp":
+    # Shut down DDP process group before single-device testing to prevent hanging
+    # This is necessary because we're switching from distributed to single-device execution
+    if strategy == "ddp" and torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
-
-    # Run Testing on a single device
+    
+    # Run testing on a single device to avoid DDP issues with uneven batch distribution
+    # Only rank 0 performs testing to ensure all samples are evaluated exactly once
     if trainer.is_global_zero:
+        # Create a single-device trainer for testing
         tester = pl.Trainer(
-            logger=wandb_logger,
+            logger=mlflow_logger,
             devices=1,
             num_nodes=1,
-            max_epochs=epochs,
             accelerator=accelerator,
             callbacks=callbacks,
         )
 
         # Load the best model checkpoint
-        logger.info(f"Testing with best performing model parameters: \n\t{model_ckpt_callback.best_model_path}")
+        if is_main_process:
+            logger.info(f"Testing with best performing model parameters: \n\t{model_ckpt_callback.best_model_path}")
+        
         # Run test using the best model weights path
         test_module = SegmentationLightningModule.load_from_checkpoint(model_ckpt_callback.best_model_path)
         test_results = tester.test(model=test_module, dataloaders=test_loader)
         tester.save_checkpoint(os.path.join(model_dir, "best.ckpt"), weights_only=True)
 
         # Save the images to the output data directory
-        logger.info(f"Saving {len(test_module.test_log_images)}")
-        for idx, (img, gt_mask, pred_mask) in enumerate(test_module.test_log_images_raw):
-            save_test_result_image(img, gt_mask, pred_mask, os.path.join(output_data_dir, f"test_{idx}.png"))
+        # logger.info(f"Saving {len(best_module.test_log_images)}")
+        # for idx, (img, gt_mask, pred_mask) in enumerate(best_module.test_log_images_raw):
+        #     save_test_result_image(img, gt_mask, pred_mask, os.path.join(output_data_dir, f"test_{idx}.png"))
 
-        # Save the images to wandb directly
-        logger.info("Saving images to wandb")
-        wandb_logger.experiment.log({"test_images": test_module.test_log_images})
+        # Save the images to MLFlow directly
+        logger.info("Saving images to MLFlow")
+        try:
+            # Create test_images directory in output_data_dir
+            test_images_dir = os.path.join(output_data_dir, "test_images")
+            os.makedirs(test_images_dir, exist_ok=True)
+            
+            # Iterate through test_log_images and save each as PNG
+            for idx, img_data in enumerate(test_module.test_log_images):
+                img_path = os.path.join(test_images_dir, f"test_image_{idx}.png")
+                create_test_image_visualization(img_data, img_path)
+            
+            # Log the test_images directory as MLFlow artifacts
+            mlflow_logger.experiment.log_artifacts(
+                run_id=mlflow_logger.run_id,
+                local_dir=test_images_dir,
+                artifact_path="test_images"
+            )
+            logger.info(f"Successfully logged {len(test_module.test_log_images)} test images to MLFlow")
+        except Exception as e:
+            logger.exception(f"Failed to log test images to MLFlow: {e}")
 
+        # Since testing runs on single device, no need to gather metrics from multiple ranks
         per_image_metrics = pd.DataFrame(test_module.test_image_metrics)
         # If metadata was provided, append the metadata to the output metrics
         # and generate per metadata results
@@ -475,15 +569,46 @@ def main(
             for column in meta_columns:
                 column_group = column if column_is_discrete(metadata, column) else pd.cut(metadata[column], bins=10)
                 grouped_mean = per_image_metrics.groupby(column_group)[["acc", "dice", "jaccard"]].mean()
-                for idx in grouped_mean.index:
-                    for col in grouped_mean.columns:
-                        wandb_logger.experiment.log({f"test_{col}_{column}_{idx}": grouped_mean.loc[idx, col]})
+                # Log grouped metrics to MLFlow
+                for col in ["acc", "dice", "jaccard"]:
+                    metrics_dict = {}
+                    for idx in grouped_mean.index:
+                        metric_name = f"test_{col}_{column}_{idx}"
+                        metric_value = float(grouped_mean.loc[idx, col])
+                        metrics_dict[metric_name] = metric_value
+                    mlflow_logger.log_metrics(metrics_dict)
 
-        per_image_metrics.to_parquet(path=os.path.join(output_data_dir, "per_image_metrics.parquet"))
+        # Save per_image_metrics locally as parquet
+
+        per_image_metrics_path = os.path.join(output_data_dir, "per_image_metrics.csv")
+        per_image_metrics.to_csv(path=per_image_metrics_path, index=False)
+        
+        # Log per_image_metrics to MLFlow as artifact
+        try:
+            mlflow_logger.experiment.log_artifact(
+                run_id=mlflow_logger.run_id,
+                local_path=per_image_metrics_path,
+                artifact_file="metrics/per_image_metrics.csv"
+            )
+            logger.info("Successfully logged per_image_metrics.parquet to MLFlow")
+        except Exception as e:
+            logger.exception(f"Failed to log per_image_metrics to MLFlow: {e}")
 
         # Save the test results in a yaml file in the output directory
-        with open(os.path.join(output_data_dir, "test_results.yaml"), "w") as fp:
+        test_results_path = os.path.join(output_data_dir, "test_results.yaml")
+        with open(test_results_path, "w") as fp:
             yaml.dump(test_results, fp)
+        
+        # Log test results to MLFlow as artifact
+        try:
+            mlflow_logger.experiment.log_artifact(
+                run_id=mlflow_logger.run_id,
+                local_path=test_results_path,
+                artifact_path="metrics"
+            )
+            logger.info("Successfully logged test_results.yaml to MLFlow")
+        except Exception as e:
+            logger.exception(f"Failed to log test_results to MLFlow: {e}")
 
 
 def load_metadata(metadata_file: str) -> Optional[pd.DataFrame]:
@@ -548,6 +673,43 @@ def save_test_result_image(image, gt_mask, pred_mask, fname):
     axs[3].set_axis_off()
     fig.subplots_adjust(wspace=0, hspace=0)
     plt.savefig(fname, bbox_inches="tight")
+    plt.close(fig)
+
+
+def create_test_image_visualization(img_data: dict, output_path: str) -> None:
+    """
+    Create a composite visualization of test image with ground truth and prediction.
+    
+    :param img_data: Dictionary containing 'image' (PIL Image), 'pred_mask' (numpy array), 
+                     and 'gt_mask' (numpy array)
+    :param output_path: Path where the visualization should be saved
+    """
+    import numpy as np
+    
+    # Extract data from dictionary
+    pil_image = img_data["image"]
+    pred_mask = img_data["pred_mask"]
+    gt_mask = img_data["gt_mask"]
+    
+    # Convert PIL image to numpy array for visualization
+    img_array = np.array(pil_image)
+    
+    # Create figure with 3 subplots: input, ground truth, prediction
+    fig, axs = plt.subplots(1, 3, figsize=(15, 5))
+    
+    axs[0].imshow(img_array, cmap="gray")
+    axs[0].set_title("Input")
+    axs[0].axis("off")
+    
+    axs[1].imshow(gt_mask, cmap="gray")
+    axs[1].set_title("Ground Truth")
+    axs[1].axis("off")
+    
+    axs[2].imshow(pred_mask, cmap="gray")
+    axs[2].set_title("Prediction")
+    axs[2].axis("off")
+    
+    plt.savefig(output_path, bbox_inches="tight")
     plt.close(fig)
 
 

@@ -5,6 +5,7 @@ from torch import nn
 class FCN(nn.Module):
     def __init__(self, input_channels: int = 1, output_channels: int = 1):
         super(FCN, self).__init__()
+        self.output_channels = output_channels  # Store for forward pass
 
         # Encoding layers
         self.enc1 = nn.Sequential(
@@ -40,7 +41,9 @@ class FCN(nn.Module):
         x3 = self.dec1(x2)
         x4 = self.dec2(x3)
         x5 = self.dec3(x4)
-        return torch.sigmoid(x5)
+        
+        # Return logits for consistency with other models
+        return x5
 
     @property
     def calculates_loss(self):

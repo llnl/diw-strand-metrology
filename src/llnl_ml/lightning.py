@@ -1,8 +1,9 @@
 import pytorch_lightning as pl
 import torch
 import torchmetrics
-import wandb
 
+from torchmetrics.segmentation import DiceScore
+from torchmetrics.functional.segmentation import dice_score
 from torchvision.transforms.functional import to_pil_image
 
 from llnl_ml.model import get_model
@@ -46,9 +47,9 @@ class SegmentationLightningModule(pl.LightningModule):
         self.loss_fn = torch.nn.BCEWithLogitsLoss()
         self.acc_metric = torchmetrics.classification.BinaryAccuracy(threshold=0.5, multidim_average="global")
         self.jaccard_metric = torchmetrics.JaccardIndex(task="binary", threshold=0.5, ignore_index=0)
-        self.dice_metric = torchmetrics.Dice(threshold=0.5)
+        self.dice_metric = DiceScore(2, include_background=False, input_format="one-hot", average="macro")
 
-        # Aggregates the first 5 test images to be logged to wandb
+        # Aggregates the first 5 test images to be logged
         self.test_log_images = list()
         self.test_log_images_raw = list()
 
@@ -62,23 +63,28 @@ class SegmentationLightningModule(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         image, targets = batch
-        if self.model.calculates_loss:
-            loss_dict = self.model(image, targets)
-            self.log_dict(loss_dict, on_step=True, sync_dist=True, prog_bar=True)
-            loss = sum(loss for loss in loss_dict.values())
-        else:
-            mask = targets["masks"].float()
-            pred = self.model(image)
-            # Squeeze out the single dimension channels dim to match mask
-            # Shape [B, 1, H, W] -> [B, H, W]
-            pred = pred.squeeze(dim=1)
-            loss = self.loss_fn(pred, mask)
-        self.log("train_loss", loss, on_step=True, sync_dist=True, prog_bar=True)
-        return loss
+        
+        # All models now return loss dict
+        _, loss_dict = self.model(image, targets)
+        
+        # Compute total loss
+        total_loss = sum(loss for loss in loss_dict.values())
+        
+        # Add total_loss to dict for logging
+        loss_dict_with_total = {**loss_dict, "total_loss": total_loss}
+        
+        # Log all losses
+        self.log_dict(loss_dict_with_total, on_step=True, sync_dist=True, prog_bar=True)
+        
+        return total_loss
 
     # Helper functions used in val and test
     def _get_eval_pred_and_mask(self, batch, batch_idx):
-        image, targets = batch
+        # Get prediction and losses from model
+        images, targets = batch
+        pred_logits, losses = self.model(images, targets)
+
+        # Extract the binary mask for computing metrics against the prediction
         if isinstance(targets, (list, tuple)):
             # For each image's target, combine the individual components into a single mask
             mask = [target["masks"].sum(dim=0, keepdim=True) for target in targets]
@@ -86,42 +92,45 @@ class SegmentationLightningModule(pl.LightningModule):
             mask = torch.concatenate(mask, dim=0)
         else:
             mask = targets["masks"]
-        pred = self.model(image)
-        pred = pred.squeeze(dim=1)
-        # Determine if we have logits or probabilities
-        # If probabilities
-        if pred.min() >= 0 and pred.max() <= 1.0:
-            pred_prob = pred
-            # Convert to pseudo logits [-1, 1] for calculating loss
-            pred_logits = (pred - 0.5) * 2.0
-        # If we have logits
-        else:
-            pred_prob = torch.nn.functional.sigmoid(pred)
-            pred_logits = pred
-        return image, mask, pred_prob, pred_logits
+
+        # Metrics expect mask to be of type int, not float
+        mask = mask.long()
+        # Send logits through sigmoid to create probabilities
+        pred_prob = torch.nn.functional.sigmoid(pred_logits)
+        
+        return images, mask, pred_prob, pred_logits, losses
+
 
     def validation_step(self, batch, batch_idx):
-        _, mask, pred_prob, pred_logits = self._get_eval_pred_and_mask(batch, batch_idx)
-        loss = self.loss_fn(pred_logits, mask.to(pred_logits))
-        self.log("val_loss", loss, on_step=False, on_epoch=True, sync_dist=True, prog_bar=True)
-        # Metrics expect mask to be of type int, not float
-        mask = mask.short()
+        # Get prediction and losses from model
+        images, mask, pred_prob, pred_logits, losses = self._get_eval_pred_and_mask(batch, batch_idx)
+
+        # Add total loss and prepend val_ to all loss keys
+        losses["total_loss"] = sum(losses.values())
+        losses = {f"val_{key}": value for key, value in losses.items()}
+
+        self.log_dict(losses, on_step=False, on_epoch=True, sync_dist=True, prog_bar=True)
+
         self.acc_metric(pred_prob, mask)
         self.jaccard_metric(pred_prob, mask)
-        self.dice_metric(pred_prob, mask)
+        self.dice_metric((pred_prob > 0.5).long(), mask)
         self.log("val_dice", self.dice_metric, on_step=False, on_epoch=True, prog_bar=True)
         self.log("val_jaccard", self.jaccard_metric, on_step=False, on_epoch=True, prog_bar=True)
         self.log("val_acc", self.acc_metric, on_step=False, on_epoch=True, prog_bar=True)
 
     def test_step(self, batch, batch_idx):
-        image, mask, pred_prob, pred_logits = self._get_eval_pred_and_mask(batch, batch_idx)
-        loss = self.loss_fn(pred_logits, mask.to(pred_logits))
-        self.log("test_loss", loss, on_step=False, on_epoch=True, sync_dist=True, prog_bar=True)
-        # Metrics expect mask to be of type int, not float
-        mask = mask.short()
+        # Get prediction and losses from model
+        images, mask, pred_prob, pred_logits, losses = self._get_eval_pred_and_mask(batch, batch_idx)
+
+        # Add total loss and prepend test_ to all loss keys
+        losses["total_loss"] = sum(losses.values())
+        losses = {f"test_{key}": value for key, value in losses.items()}
+        
+        self.log_dict(losses, on_step=False, on_epoch=True, sync_dist=True, prog_bar=True)
+        
         self.acc_metric(pred_prob, mask)
         self.jaccard_metric(pred_prob, mask)
-        self.dice_metric(pred_prob, mask)
+        self.dice_metric((pred_prob > 0.5).long(), mask)
         self.log("test_dice", self.dice_metric, on_step=False, on_epoch=True, prog_bar=True)
         self.log("test_jaccard", self.jaccard_metric, on_step=False, on_epoch=True, prog_bar=True)
         self.log("test_acc", self.acc_metric, on_step=False, on_epoch=True, prog_bar=True)
@@ -133,32 +142,30 @@ class SegmentationLightningModule(pl.LightningModule):
         else:
             image_names = batch[1]["image_name"]
 
-        for img_name, img, img_pred, gt_mask in zip(image_names, image, pred_prob, mask):
+        for img_name, img, img_pred, gt_mask in zip(image_names, images, pred_prob, mask):
             self.test_image_metrics.append(
                 {
                     "image_name": img_name,
-                    "dice": torchmetrics.functional.dice(img_pred, gt_mask).cpu().item(),
+                    "dice": dice_score((img_pred > 0.5).long(), gt_mask, num_classes=2, include_background=False, average="macro").cpu().item(),
                     "jaccard": torchmetrics.functional.classification.binary_jaccard_index(img_pred, gt_mask)
                     .cpu()
                     .item(),
                     "acc": torchmetrics.functional.classification.binary_accuracy(img_pred, gt_mask).cpu().item(),
                 }
             )
-        # If this is one of the first 5 test images, save out the mask and image to wandb
+        # If this is one of the first 5 test images, save out the mask and image
         if self.trainer.is_global_zero and len(self.test_log_images) < 5:
             # Get up to the first 5 images and masks
-            for img, img_pred, gt_mask in zip(image, pred_prob, mask):
-                np_pred_mask = (img_pred > 0.5).short().cpu().numpy()
-                np_gt_mask = gt_mask.cpu().numpy()
+            for img, img_pred, gt_mask in zip(images, pred_prob, mask):
+                np_pred_mask = (img_pred > 0.5).short().cpu().permute((1, 2, 0)).numpy()
+                np_gt_mask = gt_mask.cpu().permute((1, 2, 0)).numpy()
                 pil_image = to_pil_image(img.cpu())
-                log_image = wandb.Image(
-                    pil_image,
-                    masks={
-                        "predictions": {"mask_data": np_pred_mask},
-                        "ground_truth": {"mask_data": np_gt_mask},
-                    },
-                )
-                self.test_log_images.append(log_image)
+                # Store raw image data for logger-agnostic artifact logging
+                self.test_log_images.append({
+                    "image": pil_image,
+                    "pred_mask": np_pred_mask,
+                    "gt_mask": np_gt_mask,
+                })
                 self.test_log_images_raw.append(
                     (img.cpu().squeeze().numpy(), np_gt_mask, img_pred.cpu().squeeze().numpy())
                 )
