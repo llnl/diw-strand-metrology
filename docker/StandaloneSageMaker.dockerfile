@@ -19,13 +19,7 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt && \
 
 # Copy model artifacts to standard SageMaker locations
 # Model checkpoints (best.ckpt or last.ckpt)
-COPY ${MODEL_PATH}/*.ckpt /opt/ml/model/
-
-# Copy config.yaml if it exists (optional)
-# Using shell to handle optional file copy
-RUN if [ -f ${MODEL_PATH}/config.yaml ]; then \
-        cp ${MODEL_PATH}/config.yaml /opt/ml/model/; \
-    fi
+COPY ${MODEL_PATH} /opt/ml/model
 
 # Copy inference code to SageMaker code directory
 COPY ${MODEL_PATH}/code/ /opt/ml/code/
@@ -41,6 +35,9 @@ ENV SAGEMAKER_MODEL_DIR=/opt/ml/model
 
 # Add the code directory to PYTHONPATH so inference.py and llnl_ml can be imported
 ENV PYTHONPATH=/opt/ml/code:${PYTHONPATH}
+ENV SAGEMAKER_SUBMIT_DIRECTORY=/opt/ml/code
+ENV SAGEMAKER_MODEL_DIR=/opt/ml/model
+ENV TS_MAX_REQUEST_SIZE=26214400
 
 # Expose ports for inference and management
 EXPOSE 8080 8081
