@@ -21,7 +21,8 @@ from typing import Optional, Tuple
 
 from llnl_ml.model import count_parameters
 from llnl_ml.model.util import get_training_data_sources, get_sagemaker_resource_config
-from llnl_ml.data import get_data_loaders
+from llnl_ml.model.builder import get_model_class
+from llnl_ml.data.builder import get_dataloaders
 from llnl_ml.lightning import SegmentationLightningModule
 from llnl_ml.util import str2bool, str2intlist
 from llnl_ml.dataset import log_dataset_to_mlflow
@@ -110,6 +111,7 @@ def parse_args():
     )
     parser.add_argument("--num_workers", type=int, default=1, help="Number of workers for data loading")
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size for training")
+    parser.add_argument("--accumulate_iters", type=int, help="Accumulates gradients over N iterations for larger effective batch size", default=1)
     parser.add_argument("--epochs", type=int, default=1, help="Number of epochs for training")
     parser.add_argument(
         "--learning_rate",
@@ -126,38 +128,6 @@ def parse_args():
         help="Image mode for reading images (RGB or grayscale)",
     )
     parser.add_argument("--precision", type=str, default="16-mixed", help="Training precision to use for model.")
-    parser.add_argument("--use_random_resize", type=str2bool, default=False, help="Use random resized crops")
-    parser.add_argument(
-        "--use_random_crop",
-        type=str2bool,
-        default=False,
-        help="Uses a random crop without resizing. Mutually exclusive with use_random_resize. "
-        "If both set, will only do random resize",
-    )
-    parser.add_argument("--image_size", type=int, default=512, help="Image size for training")
-    parser.add_argument(
-        "--use_random_rotation", type=str2bool, default=False, help="Use random rotation augment during training"
-    )
-    parser.add_argument(
-        "--color_jitter", type=float, default=0.0, help="Value of color jitter to apply during training"
-    )
-    parser.add_argument("--val_image_size", type=int, default=None, help="Image size for validation set")
-    parser.add_argument("--val_batch_size", type=int, default=None, help="Batch size for validation loader")
-    parser.add_argument("--test_image_size", type=int, default=None, help="Image size for test set")
-    parser.add_argument("--test_batch_size", type=int, default=None, help="Batch size for test loader")
-    parser.add_argument(
-        "--center_crop",
-        type=str2bool,
-        default=False,
-        help="If True, performs offset center crop of image and mask prior to transforms",
-    )
-    parser.add_argument("--center_crop_size", type=int, default=1200, help="Size of the center crop")
-    parser.add_argument(
-        "--center_crop_offset",
-        type=str2intlist,
-        default=[-60, -50],
-        help="Center off set as list [Y, X] or [Height, Width] order",
-    )
     parser.add_argument(
         "--project_name",
         type=str,
@@ -179,8 +149,37 @@ def parse_args():
             "If provided, will aggregate results by fields in csv, output to logs, and generate pandas dataframe."
         ),
     )
+    parser.add_argument(
+        "--transform_config",
+        type=str,
+        default="",
+        help=(
+            "Path to YAML configuration file for data transforms. "
+            "If not provided, will use default transforms from src/llnl_ml/configs/default_transforms.yaml"
+        ),
+    )
 
     args, model_params = parser.parse_known_args()
+    
+    # Check for deprecated transform arguments and raise error
+    deprecated_args = [
+        'use_random_resize', 'use_random_crop', 'use_random_rotation', 
+        'color_jitter', 'image_size', 'val_image_size', 'test_image_size',
+        'center_crop', 'center_crop_size', 'center_crop_offset'
+    ]
+    
+    used_deprecated = []
+    for arg in deprecated_args:
+        if hasattr(model_params, arg):
+            used_deprecated.append(f"--{arg}")
+    
+    if used_deprecated:
+        raise ValueError(
+            f"The following CLI arguments are deprecated: {', '.join(used_deprecated)}. "
+            f"Please use --transform_config to specify a YAML configuration file instead. "
+            f"See src/llnl_ml/configs/default_transforms.yaml for an example."
+        )
+    
     return args, model_params
 
 
@@ -214,27 +213,19 @@ def main(
     checkpoint_dir: str = "/opt/ml/checkpoints",
     pretrained_weights: Optional[str] = None,
     split_file: Optional[str] = None,
+    transform_config: str = "",
     train_count: int = -1,
     model_params: Optional[dict] = None,
     num_workers: int = 1,
     batch_size: int = 2,
+    accumulate_iters: int = 1,
     epochs: int = 1,
     learning_rate: float = 1e-3,
     lr_schedular: str = "cosine_warmup",
     image_mode: str = "L",
     precision: str = "16-mixed",
-    image_size: int = 512,
-    val_image_size: int = None,
-    val_batch_size: int = None,
-    test_image_size: int = None,
-    test_batch_size: int = None,
-    use_random_resize: bool = False,
-    use_random_crop: bool = False,
-    use_random_rotation: bool = False,
-    color_jitter=0.0,
-    center_crop: bool = False,
-    center_crop_size: int = 1200,
-    center_crop_offset: Tuple[int] = (-60, -50),
+    val_batch_size: Optional[int] = None,
+    test_batch_size: int = 1,
     project_name: str = "project_name",
     run_name: str = "run_name",
     metadata_file: str = "",
@@ -254,29 +245,20 @@ def main(
     :param split_file: Path to json file with keys "train", "val" and "test". Each key has keys of "image" and "mask"
         with lists of filenames for that split. If not given, splits are generated randomly from all available data.
         Can be local path or S3 uri
+    :param transform_config: Path to YAML configuration file for data transforms. If not provided, uses default config.
     :param train_count: Maximum number of training samples to use. Use -1 to use all samples. Otherwise, train_count
         random samples will be used for training.
-    :param model_params: Optional dict containing
+    :param model_params: Optional dict containing model-specific parameters
     :param num_workers: Number or process workers for data loading
     :param batch_size: Batch size per GPU for training
+    :param accumulate_iters: Number of iters to accumlate gradients over increasing effective batch size.
     :param epochs: Number of epochs to train model for
     :param learning_rate: Base learning rate for optimization
     :param lr_schedular: Learning Schedular type, default is cosine with warmup "cosine_warmup"
     :param image_mode: Mode to load images in either RGB or grayscale
     :param precision: Precision value to use with lightning trainer. Default 16-mixed.
-    :param color_jitter: Float of amount of color jitter to apply as training augmentation
-    :param use_random_rotation: If true, applies random rotations as training augmentation
-    :param use_random_resize: If true, applies RandomResizedCrop transform as training augmentation
-    :param use_random_crop: If true, applies RandomCrop transform as training augmentation.
-        If use_random_resize is also True, only applies RandomResizeCrop.
-    :param image_size: Images are resized to this prior to being fed to model
-    :param val_image_size: Have val loader load image different image size if given
     :param val_batch_size: Optional, batch size for validation loader. Useful is val is using larger/smaller image size
-    :param test_image_size: Resizes images to this size for test set if given, otherwise uses val image size
     :param test_batch_size: Optional, batch size for test loader. Useful if test is using larger/smaller image size.
-    :param center_crop: If True, takes a center crop of the image and mask prior to transforms
-    :param center_crop_size: Size of the center crop
-    :param center_crop_offset: Offsets the center of the crop by [Row, Col] or [Height, Width]
     :param project_name: Name of the MLFlow experiment for organizing related runs
     :param run_name: Name of the specific MLFlow run for tracking this training execution
     :param metadata_file: Filepath or S3Uri to metadata csv file.
@@ -302,12 +284,7 @@ def main(
     data_config = dict(
         model_name=model_name,
         image_mode=image_mode,
-        center_crop=center_crop,
-        center_crop_size=center_crop_size,
-        center_crop_offset=center_crop_offset,
-        image_size=image_size,
-        val_image_size=val_image_size,
-        test_image_size=test_image_size,
+        transform_config=transform_config,
     )
     with open(os.path.join(model_dir, "config.yaml"), "w") as fp:
         yaml.dump(data_config, fp)
@@ -318,6 +295,7 @@ def main(
     # Log all hyperparameters passed into the model
     logged_config = {
         "split_file": split_file,
+        "transform_config": transform_config,
         "train_count": train_count,
         "num_workers": num_workers,
         "batch_size": batch_size,
@@ -325,14 +303,8 @@ def main(
         "learning_rate": learning_rate,
         "lr_schedular": lr_schedular,
         "precision": precision,
-        "val_image_size": val_image_size,
         "val_batch_size": val_batch_size,
-        "test_image_size": test_image_size,
         "test_batch_size": test_batch_size,
-        "use_random_resize": use_random_resize,
-        "use_random_crop": use_random_crop,
-        "use_random_rotation": use_random_rotation,
-        "color_jitter": color_jitter,
     }
     logged_config.update(data_config)
     
@@ -357,11 +329,12 @@ def main(
     
     # Initialize MLFlow logger with proper error handling
     # For DDP, delay initialization until after strategy setup to avoid serialization issues
-    mlflow_tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", f"file://{output_data_dir}/mlruns")
+    mlflow_tracking_uri = os.environ.get("MLFLOW_TRACKING_URI")
     mlflow_logger = MLFlowLogger(
         experiment_name=project_name,
         run_name=run_name,
         tracking_uri=mlflow_tracking_uri,
+        save_dir=f"{output_data_dir}/mlruns",
         log_model=True,
     )
 
@@ -398,27 +371,26 @@ def main(
         checkpoint = torch.load(pretrained_weights)
         module.load_state_dict(checkpoint["state_dict"])
 
+    # Get the model class to determine dataset requirements
+    try:
+        model_class = get_model_class(model_name)
+        logger.info(f"Using model class: {model_class.__name__}")
+    except ValueError as e:
+        logger.warning(f"Could not get model class: {e}. Using default dataset format.")
+        model_class = None
+
     # Get the data loaders
-    train_loader, val_loader, test_loader = get_data_loaders(
+    train_loader, val_loader, test_loader = get_dataloaders(
         image_folder=image_folder,
         mask_folder=mask_folder,
         batch_size=batch_size,
         split_file=split_file,
+        transform_config=transform_config,
         train_count=train_count,
         val_batch_size=val_batch_size,
         test_batch_size=test_batch_size,
         num_workers=num_workers,
-        image_mode=image_mode,
-        image_size=image_size,
-        val_image_size=val_image_size,
-        test_image_size=test_image_size,
-        use_random_resize=use_random_resize,
-        use_random_rotate=use_random_rotation,
-        color_jitter=color_jitter,
-        center_crop=center_crop,
-        center_crop_size=center_crop_size,
-        center_crop_offset=center_crop_offset,
-        needs_boxes=module.model.needs_boxes,
+        model_class=model_class,
     )
 
     # Log dataset information to MLFlow
@@ -484,9 +456,15 @@ def main(
                 f"training checkpoint {resume_checkpoint}"
             )
 
+    # Warn about gradient accumulation instability
+    if accumulate_iters > 1:
+        logger.warning(
+            f"WARNING: accumulate_grad_batches={accumulate_iters} > 1 is currently unstable "
+            f"with newer PyTorch versions and may cause training to crash or stall. "
+            f"Consider using a larger batch_size instead."
+        )
+
     # Create Trainer
-    # Use gradient accumulation to achieve larger effective batch size without OOM
-    # With batch_size=2, 8 GPUs, and accumulate=2: effective_batch = 2 * 8 * 2 = 32
     trainer = pl.Trainer(
         max_epochs=epochs,
         accelerator=accelerator,
@@ -497,7 +475,7 @@ def main(
         callbacks=callbacks,
         precision=precision,
         log_every_n_steps=10,
-        accumulate_grad_batches=2,  # Accumulate gradients to reduce memory pressure
+        accumulate_grad_batches=accumulate_iters,
     )
 
     # Train the model
@@ -581,14 +559,14 @@ def main(
         # Save per_image_metrics locally as parquet
 
         per_image_metrics_path = os.path.join(output_data_dir, "per_image_metrics.csv")
-        per_image_metrics.to_csv(path=per_image_metrics_path, index=False)
+        per_image_metrics.to_csv(per_image_metrics_path, index=False)
         
         # Log per_image_metrics to MLFlow as artifact
         try:
             mlflow_logger.experiment.log_artifact(
                 run_id=mlflow_logger.run_id,
                 local_path=per_image_metrics_path,
-                artifact_file="metrics/per_image_metrics.csv"
+                artifact_path="metrics/per_image_metrics.csv"
             )
             logger.info("Successfully logged per_image_metrics.parquet to MLFlow")
         except Exception as e:

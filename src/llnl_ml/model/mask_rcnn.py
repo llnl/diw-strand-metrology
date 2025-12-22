@@ -42,11 +42,14 @@ class MaskRCNNResNet50(torch.nn.Module):
 
     @property
     def calculates_loss(self):
+        """This model calculates its own loss during training."""
         return True
-
-    @property
-    def needs_boxes(self):
-        return True
+    
+    @staticmethod
+    def get_dataset_requirements():
+        """Returns the dataset wrapper class and collate function needed for this model."""
+        from ..data.wrappers import BoundingBoxDatasetWrapper, list_collate_fn
+        return BoundingBoxDatasetWrapper, list_collate_fn
 
     def forward(self, images, targets: Optional[dict] = None):
         # If training mode, send both images and targets and return losses

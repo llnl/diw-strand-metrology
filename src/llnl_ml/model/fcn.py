@@ -49,6 +49,8 @@ class FCN(nn.Module):
     def calculates_loss(self):
         return False
 
-    @property
-    def needs_boxes(self):
-        return False
+    @staticmethod
+    def get_dataset_requirements():
+        """Returns the dataset wrapper class and collate function needed for this model."""
+        from torch.utils.data import default_collate
+        return None, default_collate  # UNetSmall doesn't need special dataset wrapper

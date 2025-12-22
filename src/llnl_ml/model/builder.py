@@ -18,6 +18,25 @@ USES_HE_INITIALIZATION = {"UNet", "UNetSmall", "UNetMedium", "FCN"}
 SEGMENTATION_MODELS = {"UNet", "UNetSmall", "UNetMedium", "FCN"}  # Models to wrap
 
 
+def get_model_class(model_name: str):
+    """
+    Get the model class without instantiating it.
+    
+    Args:
+        model_name: Name of the model
+        
+    Returns:
+        Model class
+        
+    Raises:
+        ValueError: If model_name is not found
+    """
+    if model_name not in MODEL_NAMES:
+        raise ValueError(f"Unknown model name {model_name}. Available: {list(MODEL_NAMES.keys())}")
+    
+    return MODEL_NAMES[model_name]
+
+
 def get_model(model_name: str, input_channels: int, output_channels: int):
     if model_name not in MODEL_NAMES:
         raise ValueError(f"Unknown model name {model_name}")

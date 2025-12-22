@@ -14,6 +14,8 @@ import yaml
 
 from llnl_ml.lightning import SegmentationLightningModule
 from llnl_ml.util import decode_image, encode_image
+from llnl_ml.data.transforms import build_transforms
+from llnl_ml.data.utils import load_and_convert_image
 
 
 JSON_CONTENT_TYPE = "application/json"
@@ -78,6 +80,9 @@ def model_fn(model_dir, context):
             data_params["READ_MODE"] = cv2.IMREAD_COLOR if data_params["image_mode"] == "RGB" else cv2.IMREAD_GRAYSCALE
             data_params["THRESHOLD"] = 0.5 if data_params["model_name"] == "MaskRCNN" else 0.0
             logger.info(f"Configuration loaded: {data_params}")
+            if "transform_config" in data_params:
+                _, data_params["transforms"] = build_transforms(data_params["transform_config"])
+                logger.info(f"Loaded the transform_config file: {data_params['transform_config']}")
         # If config doesn't exist, get expected input shape from model and use default threshold
         else:
             logger.warning("No config file found, using default parameters")
@@ -130,29 +135,11 @@ def predict_fn(input_object, model, context):
         with log_timing("Inference"):
             model, data_params = model
             # Finish loading the image
-            image_byte_array = np.frombuffer(input_object, dtype=np.uint8)
-            image = cv2.imdecode(image_byte_array, cv2.IMREAD_ANYDEPTH | data_params["READ_MODE"])
-            if data_params["READ_MODE"] == cv2.IMREAD_COLOR:
-                # Convert from BGR to RGB
-                image = image[:, :, ::-1]
+            if "transforms" in data_params:
+                img = load_and_convert_image(input_object)
+                image = data_params["transforms"](image=img)["image"]
             else:
-                # Add a Channel dim to front
-                image = image[:, :, np.newaxis]
-
-            if data_params.get("center_crop", False):
-                crop_size = data_params["center_crop_size"]
-                crop_offset = data_params["center_crop_offset"]
-                top = (image.shape[0] // 2 + crop_offset[0]) - math.floor(crop_size / 2)
-                bottom = (image.shape[0] // 2 + crop_offset[0]) + math.ceil(crop_size / 2)
-                left = (image.shape[1] // 2 + crop_offset[1]) - math.floor(crop_size / 2)
-                right = (image.shape[1] // 2 + crop_offset[1]) + math.ceil(crop_size / 2)
-                image = image[top:bottom, left:right]
-
-            # Convert to torch tensor of correct shape and normalize
-            image = image.astype(dtype=np.float32) / np.iinfo(image.dtype).max
-
-            # Convert from HWC to CHW
-            image = torch.asarray(image).permute(2, 0, 1)
+                image = default_image_load(input_object, data_params)
 
             # Add a batch dimension and move to device
             image = image.unsqueeze(0).to(device)
@@ -165,6 +152,7 @@ def predict_fn(input_object, model, context):
             return mask
     except Exception as e:
         logger.exception(f"Error in predict_fn: {e}")
+        raise e
 
 
 def output_fn(prediction_output, accept=JSON_CONTENT_TYPE):
@@ -185,3 +173,44 @@ def output_fn(prediction_output, accept=JSON_CONTENT_TYPE):
     except Exception as e:
         logger.exception(f"Error in output_fn: {e}")
         raise e
+
+
+def default_image_load(image_bytes, data_params):
+    image_byte_array = np.frombuffer(image_bytes, dtype=np.uint8)
+    image = cv2.imdecode(image_byte_array, cv2.IMREAD_ANYDEPTH | data_params["READ_MODE"])
+    
+    if image is None:
+        raise ValueError("Failed to decode image bytes. Invalid image format or corrupted data.")
+    
+    if data_params["READ_MODE"] == cv2.IMREAD_COLOR:
+        # Convert from BGR to RGB
+        image = image[:, :, ::-1]
+    else:
+        # Add a Channel dim to front
+        image = image[:, :, np.newaxis]
+
+    if data_params.get("center_crop", False):
+        crop_size = data_params["center_crop_size"]
+        crop_offset = data_params["center_crop_offset"]
+        top = (image.shape[0] // 2 + crop_offset[0]) - math.floor(crop_size / 2)
+        bottom = (image.shape[0] // 2 + crop_offset[0]) + math.ceil(crop_size / 2)
+        left = (image.shape[1] // 2 + crop_offset[1]) - math.floor(crop_size / 2)
+        right = (image.shape[1] // 2 + crop_offset[1]) + math.ceil(crop_size / 2)
+        image = image[top:bottom, left:right]
+
+    # Convert to torch tensor of correct shape and normalize
+    # Handle normalization based on image data type
+    if image.dtype == np.uint8:
+        max_val = 255.0
+    elif image.dtype == np.uint16:
+        max_val = 65535.0
+    elif np.issubdtype(image.dtype, np.integer):
+        # For other integer types, use a safe approach
+        max_val = float(image.max()) if image.size > 0 else 1.0
+    else:
+        max_val = 1.0
+    
+    image = image.astype(np.float32) / max_val
+
+    # Convert from HWC to CHW
+    return torch.asarray(image).permute(2, 0, 1)

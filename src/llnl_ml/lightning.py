@@ -8,6 +8,7 @@ from torchvision.transforms.functional import to_pil_image
 
 from llnl_ml.model import get_model
 from llnl_ml.optimizer import get_optimizer
+from timm.scheduler.scheduler import Scheduler as TIMMScheduler
 
 from typing import Optional, Any, Union
 
@@ -45,7 +46,7 @@ class SegmentationLightningModule(pl.LightningModule):
         if isinstance(schedular_params, dict):
             self._lr_scheduler_params.update(schedular_params)
         self.loss_fn = torch.nn.BCEWithLogitsLoss()
-        self.acc_metric = torchmetrics.classification.BinaryAccuracy(threshold=0.5, multidim_average="global")
+        self.acc_metric = torchmetrics.Accuracy(task="binary", threshold=0.5, multidim_average="global")
         self.jaccard_metric = torchmetrics.JaccardIndex(task="binary", threshold=0.5, ignore_index=0)
         self.dice_metric = DiceScore(2, include_background=False, input_format="one-hot", average="macro")
 
@@ -65,7 +66,7 @@ class SegmentationLightningModule(pl.LightningModule):
         image, targets = batch
         
         # All models now return loss dict
-        _, loss_dict = self.model(image, targets)
+        pred_logits, loss_dict = self.model(image, targets)
         
         # Compute total loss
         total_loss = sum(loss for loss in loss_dict.values())
@@ -147,10 +148,10 @@ class SegmentationLightningModule(pl.LightningModule):
                 {
                     "image_name": img_name,
                     "dice": dice_score((img_pred > 0.5).long(), gt_mask, num_classes=2, include_background=False, average="macro").cpu().item(),
-                    "jaccard": torchmetrics.functional.classification.binary_jaccard_index(img_pred, gt_mask)
+                    "jaccard": torchmetrics.functional.jaccard_index((img_pred > 0.5).long(), gt_mask, task="binary")
                     .cpu()
                     .item(),
-                    "acc": torchmetrics.functional.classification.binary_accuracy(img_pred, gt_mask).cpu().item(),
+                    "acc": torchmetrics.functional.accuracy((img_pred > 0.5).long(), gt_mask, task="binary").cpu().item(),
                 }
             )
         # If this is one of the first 5 test images, save out the mask and image
@@ -179,20 +180,15 @@ class SegmentationLightningModule(pl.LightningModule):
             lr=self.lr,
             scheduler_type=self.scheduler_type,
             lr_scheduler_params=self._lr_scheduler_params,
-            max_epochs=self.trainer.max_epochs,
-            use_zero_grad=self.use_zero_grad,
+            max_iters=int(self.trainer.estimated_stepping_batches),
         )
 
         return optimizers
 
     def lr_scheduler_step(self, scheduler: Any, metric: Optional[Any]) -> None:
-        if metric is None:
-            if self._scheduler_needs_epoch:
-                scheduler.step(epoch=self.current_epoch)
-            else:
-                scheduler.step()  # type: ignore[call-arg]
+        if isinstance(scheduler, TIMMScheduler):
+            # TIMM schedulers expect the step number (0-indexed)
+            # For step-based scheduling, use global_step
+            scheduler.step(epoch=self.trainer.global_step)
         else:
-            if self._scheduler_needs_epoch:
-                scheduler.step(metric=metric, epoch=self.current_epoch)
-            else:
-                scheduler.step(metric)
+            super().lr_scheduler_step(scheduler=scheduler, metric=metric)

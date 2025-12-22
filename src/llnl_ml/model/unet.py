@@ -38,9 +38,11 @@ class UNet(nn.Module):
     def calculates_loss(self):
         return False
 
-    @property
-    def needs_boxes(self):
-        return False
+    @staticmethod
+    def get_dataset_requirements():
+        """Returns the dataset wrapper class and collate function needed for this model."""
+        from torch.utils.data import default_collate
+        return None, default_collate  # UNet doesn't need special dataset wrapper
 
     def forward(self, x):
         x = self.conv1(x)
@@ -79,9 +81,11 @@ class UNetSmall(nn.Module):
     def calculates_loss(self):
         return False
 
-    @property
-    def needs_boxes(self):
-        return False
+    @staticmethod
+    def get_dataset_requirements():
+        """Returns the dataset wrapper class and collate function needed for this model."""
+        from torch.utils.data import default_collate
+        return None, default_collate  # UNetSmall doesn't need special dataset wrapper
 
     def contract_block(self, in_channels, out_channels):
         block = nn.Sequential(
@@ -142,9 +146,11 @@ class UNetMedium(nn.Module):
     def calculates_loss(self):
         return False
 
-    @property
-    def needs_boxes(self):
-        return False
+    @staticmethod
+    def get_dataset_requirements():
+        """Returns the dataset wrapper class and collate function needed for this model."""
+        from torch.utils.data import default_collate
+        return None, default_collate  # UNetMedium doesn't need special dataset wrapper
 
 
 class DoubleConv(torch.nn.Module):
