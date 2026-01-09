@@ -22,6 +22,8 @@ def get_optimizer(
     if scheduler_type in scheduler_map:
         scheduler_type = scheduler_map.get(scheduler_type, scheduler_type)
 
+    warmup_iters = min(max_iters // 10, 400)
+    
     try:
         scheduler, _ = create_scheduler_v2(
             optimizer=optimizer,
@@ -29,8 +31,9 @@ def get_optimizer(
             num_epochs=max_iters,  # "epochs" are actually iterations
             step_on_epochs=True,  # Force epoch-based (but we'll step with iteration numbers)
             updates_per_epoch=1,  # Not used when step_on_epochs=True
-            warmup_epochs=min(max_iters // 2, 400),  # Warmup "epochs" are actually iterations
+            warmup_epochs=warmup_iters,
             warmup_lr=lr / 1000.0,
+            warmup_prefix=True,  # Ensures cosine curve starts AFTER warmup, not from step 0
         )
     except Exception as e:
         print(f"Warning: Failed to create scheduler '{scheduler_type}': {e}")

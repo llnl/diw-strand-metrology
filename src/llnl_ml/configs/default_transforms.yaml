@@ -1,0 +1,37 @@
+train:
+    - name: RandomResizedCrop
+      size: 
+        - 1200
+        - 1200
+      p: 1.0
+    - name: Rotate
+      p: 0.25
+    - name: HorizontalFlip
+      p: 0.25
+    - name: VerticalFlip
+      p: 0.25
+    - name: RandomBrightnessContrast
+      p: 0.25
+    - name: GaussNoise
+      p: 0.1
+    - name: GaussianBlur
+      p: 0.1
+    - name: ElasticTransform
+      p: 0.1
+    - name: CLAHE
+      p: 0.1
+    - name: CoarseDropout
+      p: 0.1
+    - name: MotionBlur
+      p: 0.1
+    - name: Normalize
+    - name: ToTensorV2
+val:
+    - name: Crop
+      x_min: 374
+      x_max: 1574
+      y_min: 364
+      y_max: 1564
+      pad_if_needed: true
+    - name: Normalize
+    - name: ToTensorV2
