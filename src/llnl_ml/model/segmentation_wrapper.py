@@ -50,31 +50,24 @@ class SegmentationModelWithLoss(nn.Module):
     
     def forward(self, images: torch.Tensor, targets: Optional[Dict] = None):
         """
-        Forward pass that computes loss during training, returns logits during eval.
+        Forward pass that always returns (pred_logits, loss_dict) tuple.
         
         Args:
             images: Input images tensor [B, C, H, W]
             targets: Dict containing 'masks' key with ground truth masks [B, H, W]
         
         Returns:
-            If training: Dict with loss values (e.g., {"loss_mask": 0.5, "loss_dice": 0.3})
-            If eval: Logits tensor [B, H, W]
+            Tuple of (pred_logits, loss_dict) where loss_dict is empty if no targets
         """
         # Get predictions from model (already squeezed if output_channels=1)
         pred_logits = self.model(images)
         
-        if self.training:
-            # Training mode: compute and return loss dict
-            if targets is None:
-                raise ValueError("targets must be provided during training")
-            
         loss_dict = {}
         if targets is not None:
             mask = targets["masks"].float()
-        
+            
             # Compute all losses
             for loss_name, loss_fn in self.loss_fns.items():
                 loss_dict[loss_name] = loss_fn(pred_logits, mask)
         
-        # Return logits and loss dict (loss dict will be empty if targets is None)
         return pred_logits, loss_dict

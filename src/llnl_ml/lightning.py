@@ -2,7 +2,8 @@ import pytorch_lightning as pl
 import torch
 import torchmetrics
 
-from torchmetrics.segmentation import DiceScore
+from torchmetrics.classification import BinaryMatthewsCorrCoef
+from torchmetrics.segmentation import DiceScore, HausdorffDistance
 from torchmetrics.functional.segmentation import dice_score
 from torchvision.transforms.functional import to_pil_image
 
@@ -27,6 +28,7 @@ class SegmentationLightningModule(pl.LightningModule):
         use_zero_grad: bool = False,
         schedular_type: str = "cosine_warmup",
         schedular_params: Optional[dict] = None,
+        max_hausdorff_size: int = -1,
         **kwargs,
     ):
         super().__init__()
@@ -49,6 +51,9 @@ class SegmentationLightningModule(pl.LightningModule):
         self.acc_metric = torchmetrics.Accuracy(task="binary", threshold=0.5, multidim_average="global")
         self.jaccard_metric = torchmetrics.JaccardIndex(task="binary", threshold=0.5, ignore_index=0)
         self.dice_metric = DiceScore(2, include_background=False, input_format="one-hot", average="macro")
+        self.mathew_coer_metric = BinaryMatthewsCorrCoef(ignore_index=0, threshold=0.5)
+        self.hausdorff_metric = HausdorffDistance(2, include_background=False, input_format="one-hot")
+        self._max_hausdorff_size = max_hausdorff_size
 
         # Aggregates the first 5 test images to be logged
         self.test_log_images = list()
@@ -104,7 +109,8 @@ class SegmentationLightningModule(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         # Get prediction and losses from model
-        images, mask, pred_prob, pred_logits, losses = self._get_eval_pred_and_mask(batch, batch_idx)
+        _, mask, pred_prob, _, losses = self._get_eval_pred_and_mask(batch, batch_idx)
+        pred_mask = (pred_prob > 0.5).long()
 
         # Add total loss and prepend val_ to all loss keys
         losses["total_loss"] = sum(losses.values())
@@ -114,14 +120,23 @@ class SegmentationLightningModule(pl.LightningModule):
 
         self.acc_metric(pred_prob, mask)
         self.jaccard_metric(pred_prob, mask)
-        self.dice_metric((pred_prob > 0.5).long(), mask)
+        self.mathew_coer_metric(pred_prob, mask)
+        self.dice_metric(pred_mask, mask)
+        if self._max_hausdorff_size > -1:
+            pred_mask = torch.nn.functional.interpolate(pred_mask.to(torch.uint8), size=(self._max_hausdorff_size, self._max_hausdorff_size), mode="nearest-exact")
+            mask = torch.nn.functional.interpolate(mask.to(torch.uint8), size=(self._max_hausdorff_size, self._max_hausdorff_size), mode="nearest-exact")
+        self.hausdorff_metric(pred_mask.cpu(), mask.cpu())
+
         self.log("val_dice", self.dice_metric, on_step=False, on_epoch=True, prog_bar=True)
         self.log("val_jaccard", self.jaccard_metric, on_step=False, on_epoch=True, prog_bar=True)
         self.log("val_acc", self.acc_metric, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("val_mathews", self.mathew_coer_metric, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("val_hausdorff", self.hausdorff_metric, on_step=False, on_epoch=True, prog_bar=True)
 
     def test_step(self, batch, batch_idx):
         # Get prediction and losses from model
         images, mask, pred_prob, pred_logits, losses = self._get_eval_pred_and_mask(batch, batch_idx)
+        pred_mask = (pred_prob > 0.5).long()
 
         # Add total loss and prepend test_ to all loss keys
         losses["total_loss"] = sum(losses.values())
@@ -131,10 +146,19 @@ class SegmentationLightningModule(pl.LightningModule):
         
         self.acc_metric(pred_prob, mask)
         self.jaccard_metric(pred_prob, mask)
-        self.dice_metric((pred_prob > 0.5).long(), mask)
+        self.mathew_coer_metric(pred_prob, mask)
+        self.dice_metric(pred_mask, mask)
+        resized_mask = mask
+        if self._max_hausdorff_size > -1:
+            pred_mask = torch.nn.functional.interpolate(pred_mask.to(torch.uint8), size=(self._max_hausdorff_size, self._max_hausdorff_size), mode="nearest-exact")
+            resized_mask = torch.nn.functional.interpolate(mask.to(torch.uint8), size=(self._max_hausdorff_size, self._max_hausdorff_size), mode="nearest-exact")
+        self.hausdorff_metric(pred_mask.cpu(), resized_mask.cpu())
+
         self.log("test_dice", self.dice_metric, on_step=False, on_epoch=True, prog_bar=True)
         self.log("test_jaccard", self.jaccard_metric, on_step=False, on_epoch=True, prog_bar=True)
         self.log("test_acc", self.acc_metric, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("test_mathews", self.mathew_coer_metric, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("test_hausdorff", self.hausdorff_metric, on_step=False, on_epoch=True, prog_bar=True)
 
         # Store scores for logging later
         # To ensure a one to one mapping of metrics to images we will re-compute using the functional interface

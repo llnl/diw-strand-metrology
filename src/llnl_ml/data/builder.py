@@ -1,8 +1,10 @@
 import logging
 import os
 import random
+from pathlib import Path
 from typing import Optional
 
+from importlib.resources import files
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, default_collate
 
@@ -12,6 +14,9 @@ from .utils import load_json_file
 from .wrappers import get_dataset_wrapper
 
 logger = logging.getLogger(__name__)
+
+
+DEFAULT_CONFIG_FILE = "default_transforms.yaml"
 
 
 def get_dataloaders(
@@ -29,23 +34,17 @@ def get_dataloaders(
     # Get the image and mask file paths for each split
     train_paths, val_paths, test_paths = get_paths_for_splits(image_folder, mask_folder, split_file, train_count)
 
-    # Get the transform jobs - use default config if not provided
     if not transform_config:
-        # Use default config from package
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        transform_config = os.path.join(os.path.dirname(current_dir), 'configs', 'default_transforms.yaml')
-        logger.info(f"No transform config provided, using default: {transform_config}")
-    else:
-        # If just a filename is provided (no path separators), look in configs folder
-        if os.path.basename(transform_config) == transform_config:
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            config_path = os.path.join(os.path.dirname(current_dir), 'configs', transform_config)
-            if os.path.exists(config_path):
-                transform_config = config_path
-                logger.info(f"Found config file in configs folder: {transform_config}")
-            else:
-                logger.warning(f"Config file '{transform_config}' not found in configs folder, using as-is")
+        transform_config = DEFAULT_CONFIG_FILE
     
+    if os.path.basename(transform_config) == transform_config:
+        config_path = _get_config_path(transform_config)
+        if config_path and os.path.exists(config_path):
+            transform_config = config_path
+            logger.info(f"Found config file in configs folder: {transform_config}")
+        else:
+            logger.warning(f"Config file '{transform_config}' not found in configs folder, using as-is")
+
     train_transform, val_transform = build_transforms(transform_config)
 
     # Build the base datasets
@@ -131,3 +130,30 @@ def get_paths_for_splits(
         logger.info(f"Training with {len(sampled_ind)}/{init_train_count} training images.")
 
     return {"image_paths": img_train, "mask_paths": mask_train}, {"image_paths": img_val, "mask_paths": mask_val}, {"image_paths": img_test, "mask_paths": mask_test}
+
+
+def _get_config_path(config_filename: str) -> Optional[str]:
+    """
+    Get the path to a config file in the configs directory.
+    
+    Args:
+        config_filename: Name of the config file (e.g., 'custom_transforms.yaml')
+        
+    Returns:
+        str or None: Path to the config file if it exists, None otherwise
+    """
+    try:
+        # Use importlib.resources to get the config file from the package
+        config_files = files('llnl_ml.configs')
+        config_path = config_files / config_filename
+        
+        # Check if the file exists and return string path
+        if hasattr(config_path, 'is_file') and config_path.is_file():
+            return str(config_path)
+        return None
+    except Exception as e:
+        # Fallback to the old method if importlib.resources fails
+        logger.warning(f"Failed to use importlib.resources, falling back to file path resolution: {e}")
+        current_dir = Path(__file__).parent
+        config_path = current_dir.parent / 'configs' / config_filename
+        return str(config_path) if config_path.exists() else None

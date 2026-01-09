@@ -158,6 +158,15 @@ def parse_args():
             "If not provided, will use default transforms from src/llnl_ml/configs/default_transforms.yaml"
         ),
     )
+    parser.add_argument(
+        "--max_hausdorff_size", 
+        type=int, 
+        default=256, 
+        help=(
+            "Maximum allowed image size for computing Hausdorff Distance. "
+            "Images larger than max, resized to max. Use -1 for no limit."
+        )
+    )
 
     args, model_params = parser.parse_known_args()
     
@@ -229,6 +238,7 @@ def main(
     project_name: str = "project_name",
     run_name: str = "run_name",
     metadata_file: str = "",
+    max_hausdorff_size: int = 512,
 ) -> None:
     """
     :param model_name: Name of model to train
@@ -358,6 +368,7 @@ def main(
         output_channels=1,
         lr=learning_rate,
         schedular_type=lr_schedular,
+        max_hausdorff_size=max_hausdorff_size,
     )
 
     if is_main_process:
