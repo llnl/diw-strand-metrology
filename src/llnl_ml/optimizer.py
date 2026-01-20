@@ -9,6 +9,7 @@ def get_optimizer(
     scheduler_type: str = "cosine",
     lr_scheduler_params: Optional[dict] = None,
     max_iters: int = 1000,
+    warmup_percent: float = 0.1
 ):
     if lr_scheduler_params is None:
         lr_scheduler_params = {}
@@ -22,7 +23,7 @@ def get_optimizer(
     if scheduler_type in scheduler_map:
         scheduler_type = scheduler_map.get(scheduler_type, scheduler_type)
 
-    warmup_iters = min(max_iters // 10, 400)
+    warmup_iters = int(max_iters * warmup_percent)
     
     try:
         scheduler, _ = create_scheduler_v2(

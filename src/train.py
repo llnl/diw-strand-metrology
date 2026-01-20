@@ -25,7 +25,7 @@ from llnl_ml.model.builder import get_model_class
 from llnl_ml.data.builder import get_dataloaders
 from llnl_ml.lightning import SegmentationLightningModule
 from llnl_ml.util import str2bool, str2intlist
-from llnl_ml.dataset import log_dataset_to_mlflow
+from llnl_ml.mlflow_dataset import log_dataset_to_mlflow
 
 from pytorch_lightning.loggers import MLFlowLogger
 
@@ -111,7 +111,7 @@ def parse_args():
     )
     parser.add_argument("--num_workers", type=int, default=1, help="Number of workers for data loading")
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size for training")
-    parser.add_argument("--accumulate_iters", type=int, help="Accumulates gradients over N iterations for larger effective batch size", default=1)
+    parser.add_argument("--accumulate_iters", type=int, help="Accumulates gradients over N iterations for larger effective batch size", default=10)
     parser.add_argument("--epochs", type=int, default=1, help="Number of epochs for training")
     parser.add_argument(
         "--learning_rate",
@@ -120,6 +120,7 @@ def parse_args():
         help="Learning rate for the optimizer",
     )
     parser.add_argument("--lr_schedular", type=str, default="cosine_warmup", help="LR Schedular")
+    parser.add_argument("--warmup_epochs", type=int, default=1, help="Number of epochs to apply linear warmup lr schedule.")
     parser.add_argument(
         "--image_mode",
         type=str,
@@ -228,9 +229,10 @@ def main(
     num_workers: int = 1,
     batch_size: int = 2,
     accumulate_iters: int = 1,
-    epochs: int = 1,
+    epochs: int = 10,
     learning_rate: float = 1e-3,
     lr_schedular: str = "cosine_warmup",
+    warmup_epochs: int = 1,
     image_mode: str = "L",
     precision: str = "16-mixed",
     val_batch_size: Optional[int] = None,
@@ -368,6 +370,8 @@ def main(
         output_channels=1,
         lr=learning_rate,
         schedular_type=lr_schedular,
+        epochs=epochs,
+        warmup_epochs=warmup_epochs,
         max_hausdorff_size=max_hausdorff_size,
     )
 

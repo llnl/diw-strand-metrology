@@ -25,8 +25,9 @@ class SegmentationLightningModule(pl.LightningModule):
         input_channels: int = 1,
         output_channels: int = 1,
         lr: float = 1e-3,
-        use_zero_grad: bool = False,
         schedular_type: str = "cosine_warmup",
+        epochs: int = 10,
+        warmup_epochs: int = 1,
         schedular_params: Optional[dict] = None,
         max_hausdorff_size: int = -1,
         **kwargs,
@@ -41,7 +42,8 @@ class SegmentationLightningModule(pl.LightningModule):
             self.save_hyperparameters(ignore=["model_name"])
             self.model = model_name
         self.lr = lr
-        self.use_zero_grad = use_zero_grad
+        self.epochs = epochs
+        self.warmup_epochs = warmup_epochs
         self.scheduler_type = schedular_type
         self._scheduler_needs_epoch = False
         self._lr_scheduler_params = dict(mode="min", factor=0.1, patience=10, verbose=False)
@@ -205,6 +207,7 @@ class SegmentationLightningModule(pl.LightningModule):
             scheduler_type=self.scheduler_type,
             lr_scheduler_params=self._lr_scheduler_params,
             max_iters=int(self.trainer.estimated_stepping_batches),
+            warmup_percent=(self.warmup_epochs / self.epochs)
         )
 
         return optimizers
