@@ -1,7 +1,7 @@
 torch>=2.3.1
 torchvision>=0.15.2
 torchmetrics>=1.7.0
-mlflow==3.0
+mlflow==3.4
 albumentations==2.0.8
 sagemaker-mlflow
 scikit-learn

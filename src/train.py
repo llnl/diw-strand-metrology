@@ -111,7 +111,7 @@ def parse_args():
     )
     parser.add_argument("--num_workers", type=int, default=1, help="Number of workers for data loading")
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size for training")
-    parser.add_argument("--accumulate_iters", type=int, help="Accumulates gradients over N iterations for larger effective batch size", default=10)
+    parser.add_argument("--accumulate_iters", type=int, help="Accumulates gradients over N iterations for larger effective batch size", default=1)
     parser.add_argument("--epochs", type=int, default=1, help="Number of epochs for training")
     parser.add_argument(
         "--learning_rate",

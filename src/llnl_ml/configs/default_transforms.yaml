@@ -25,6 +25,7 @@ train:
     - name: MotionBlur
       p: 0.1
     - name: Normalize
+      max_pixel_value: 1.0
     - name: ToTensorV2
 val:
     - name: Crop
@@ -34,4 +35,5 @@ val:
       y_max: 1564
       pad_if_needed: true
     - name: Normalize
+      max_pixel_value: 1.0
     - name: ToTensorV2
