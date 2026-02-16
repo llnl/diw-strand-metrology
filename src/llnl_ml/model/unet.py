@@ -34,6 +34,8 @@ class UNet(nn.Module):
             self.up_conv.append(UpConv(in_ch, out_ch))
             self.final_conv = nn.Conv2d(depth_channels[0], output_channels, kernel_size=1)
 
+        self.pool = nn.AdaptiveAvgPool2d((1, 1))
+
     @property
     def calculates_loss(self):
         return False
@@ -42,7 +44,22 @@ class UNet(nn.Module):
     def get_dataset_requirements():
         """Returns the dataset wrapper class and collate function needed for this model."""
         from torch.utils.data import default_collate
+
         return None, default_collate  # UNet doesn't need special dataset wrapper
+
+    def encode(self, x):
+        """
+        Used to generate image encodings from the model. Outputs the GlobalAveragePool of the
+        final down conv layer in the network. This will have the same dimension as the final
+        depth_channels value for the model.
+        """
+        x = self.conv1(x)
+        for down in self.down_conv:
+            x = down(x)
+
+        x = self.pool(x)
+
+        return x
 
     def forward(self, x):
         x = self.conv1(x)
@@ -53,11 +70,10 @@ class UNet(nn.Module):
 
         for up, x_prior in zip(self.up_conv, reversed(x_down)):
             x = up(x, x_prior)
-        
-        out = self.final_conv(x)
-        
-        return out
 
+        out = self.final_conv(x)
+
+        return out
 
 
 class UNetSmall(nn.Module):
@@ -85,6 +101,7 @@ class UNetSmall(nn.Module):
     def get_dataset_requirements():
         """Returns the dataset wrapper class and collate function needed for this model."""
         from torch.utils.data import default_collate
+
         return None, default_collate  # UNetSmall doesn't need special dataset wrapper
 
     def contract_block(self, in_channels, out_channels):
@@ -150,6 +167,7 @@ class UNetMedium(nn.Module):
     def get_dataset_requirements():
         """Returns the dataset wrapper class and collate function needed for this model."""
         from torch.utils.data import default_collate
+
         return None, default_collate  # UNetMedium doesn't need special dataset wrapper
 
 

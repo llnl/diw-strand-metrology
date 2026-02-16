@@ -111,7 +111,12 @@ def parse_args():
     )
     parser.add_argument("--num_workers", type=int, default=1, help="Number of workers for data loading")
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size for training")
-    parser.add_argument("--accumulate_iters", type=int, help="Accumulates gradients over N iterations for larger effective batch size", default=1)
+    parser.add_argument(
+        "--accumulate_iters",
+        type=int,
+        help="Accumulates gradients over N iterations for larger effective batch size",
+        default=1,
+    )
     parser.add_argument("--epochs", type=int, default=1, help="Number of epochs for training")
     parser.add_argument(
         "--learning_rate",
@@ -120,7 +125,12 @@ def parse_args():
         help="Learning rate for the optimizer",
     )
     parser.add_argument("--lr_schedular", type=str, default="cosine_warmup", help="LR Schedular")
-    parser.add_argument("--warmup_epochs", type=int, default=1, help="Number of epochs to apply linear warmup lr schedule.")
+    parser.add_argument(
+        "--warmup_epochs", type=int, default=1, help="Number of epochs to apply linear warmup lr schedule."
+    )
+    parser.add_argument(
+        "--validation_frequency", type=int, default=1, help="Runs validation every n epochs. Default 1."
+    )
     parser.add_argument(
         "--image_mode",
         type=str,
@@ -160,36 +170,49 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--max_hausdorff_size", 
-        type=int, 
-        default=256, 
+        "--hausdorff_in_validation",
+        type=str2bool,
+        default=False,
+        help="If True, computes the hausdorff distance during the validation step, otherwise only during the final test step.",
+    )
+    parser.add_argument(
+        "--max_hausdorff_size",
+        type=int,
+        default=256,
         help=(
             "Maximum allowed image size for computing Hausdorff Distance. "
             "Images larger than max, resized to max. Use -1 for no limit."
-        )
+        ),
     )
 
     args, model_params = parser.parse_known_args()
-    
+
     # Check for deprecated transform arguments and raise error
     deprecated_args = [
-        'use_random_resize', 'use_random_crop', 'use_random_rotation', 
-        'color_jitter', 'image_size', 'val_image_size', 'test_image_size',
-        'center_crop', 'center_crop_size', 'center_crop_offset'
+        "use_random_resize",
+        "use_random_crop",
+        "use_random_rotation",
+        "color_jitter",
+        "image_size",
+        "val_image_size",
+        "test_image_size",
+        "center_crop",
+        "center_crop_size",
+        "center_crop_offset",
     ]
-    
+
     used_deprecated = []
     for arg in deprecated_args:
         if hasattr(model_params, arg):
             used_deprecated.append(f"--{arg}")
-    
+
     if used_deprecated:
         raise ValueError(
             f"The following CLI arguments are deprecated: {', '.join(used_deprecated)}. "
             f"Please use --transform_config to specify a YAML configuration file instead. "
             f"See src/llnl_ml/configs/default_transforms.yaml for an example."
         )
-    
+
     return args, model_params
 
 
@@ -230,6 +253,7 @@ def main(
     batch_size: int = 2,
     accumulate_iters: int = 1,
     epochs: int = 10,
+    validation_frequency: int = 1,
     learning_rate: float = 1e-3,
     lr_schedular: str = "cosine_warmup",
     warmup_epochs: int = 1,
@@ -240,7 +264,8 @@ def main(
     project_name: str = "project_name",
     run_name: str = "run_name",
     metadata_file: str = "",
-    max_hausdorff_size: int = 512,
+    hausdorff_in_validation: bool = False,
+    max_hausdorff_size: int = 256,
 ) -> None:
     """
     :param model_name: Name of model to train
@@ -265,8 +290,10 @@ def main(
     :param batch_size: Batch size per GPU for training
     :param accumulate_iters: Number of iters to accumlate gradients over increasing effective batch size.
     :param epochs: Number of epochs to train model for
+    :param validation_frequency: Runs validation every n epochs. Default 1.
     :param learning_rate: Base learning rate for optimization
     :param lr_schedular: Learning Schedular type, default is cosine with warmup "cosine_warmup"
+    :param warmup_epochs: Number of epochs to apply linear warmup lr schedule.
     :param image_mode: Mode to load images in either RGB or grayscale
     :param precision: Precision value to use with lightning trainer. Default 16-mixed.
     :param val_batch_size: Optional, batch size for validation loader. Useful is val is using larger/smaller image size
@@ -274,11 +301,15 @@ def main(
     :param project_name: Name of the MLFlow experiment for organizing related runs
     :param run_name: Name of the specific MLFlow run for tracking this training execution
     :param metadata_file: Filepath or S3Uri to metadata csv file.
+    :param hausdorff_in_validation: If True, computes hausdorff distance during validation step. Otherwise only
+        computed during the final test step. Default False.
+    :param max_hausdorff_size: Maximum image size for computing Hausdorff Distance. Images larger than this are
+        resized before computation. Use -1 for no limit.
     """
     # Determine if this is the main process (for logging)
     # In non-distributed mode, this will always be True
     is_main_process = int(os.environ.get("LOCAL_RANK", 0)) == 0
-    
+
     if is_main_process:
         logger.info("Starting training run with the following parameters:")
         logger.info(f"{locals()}")
@@ -286,10 +317,10 @@ def main(
     # Get training data sources (S3 URIs) using hybrid approach
     training_data_info = get_training_data_sources()
     resource_config = get_sagemaker_resource_config()
-    
+
     if is_main_process and resource_config:
-        current_host = resource_config.get('current_host', 'unknown')
-        hosts = resource_config.get('hosts', [])
+        current_host = resource_config.get("current_host", "unknown")
+        hosts = resource_config.get("hosts", [])
         logger.info(f"SageMaker Resource Config: Host {current_host} of {hosts}")
 
     # Save input information important for inference later as a config.yaml file in the model output dir
@@ -312,6 +343,7 @@ def main(
         "num_workers": num_workers,
         "batch_size": batch_size,
         "epochs": epochs,
+        "warmup_epochs": warmup_epochs,
         "learning_rate": learning_rate,
         "lr_schedular": lr_schedular,
         "precision": precision,
@@ -319,26 +351,26 @@ def main(
         "test_batch_size": test_batch_size,
     }
     logged_config.update(data_config)
-    
+
     # Add training data source metadata to logged config for MLFlow tracking
-    if training_data_info.get('input_data_config'):
+    if training_data_info.get("input_data_config"):
         # Add SageMaker job metadata if available
-        if training_data_info.get('training_job_name'):
-            logged_config['sagemaker_training_job_name'] = training_data_info['training_job_name']
-        if training_data_info.get('training_job_arn'):
-            logged_config['sagemaker_training_job_arn'] = training_data_info['training_job_arn']
-        if training_data_info.get('instance_type'):
-            logged_config['sagemaker_instance_type'] = training_data_info['instance_type']
-        if training_data_info.get('instance_count'):
-            logged_config['sagemaker_instance_count'] = training_data_info['instance_count']
-    
+        if training_data_info.get("training_job_name"):
+            logged_config["sagemaker_training_job_name"] = training_data_info["training_job_name"]
+        if training_data_info.get("training_job_arn"):
+            logged_config["sagemaker_training_job_arn"] = training_data_info["training_job_arn"]
+        if training_data_info.get("instance_type"):
+            logged_config["sagemaker_instance_type"] = training_data_info["instance_type"]
+        if training_data_info.get("instance_count"):
+            logged_config["sagemaker_instance_count"] = training_data_info["instance_count"]
+
     if resource_config:
-        logged_config['sagemaker_current_host'] = resource_config.get('current_host', 'unknown')
-        logged_config['sagemaker_hosts'] = resource_config.get('hosts', [])
+        logged_config["sagemaker_current_host"] = resource_config.get("current_host", "unknown")
+        logged_config["sagemaker_hosts"] = resource_config.get("hosts", [])
 
     # Get the number of GPUs available for training for use later
     num_gpus = torch.cuda.device_count()
-    
+
     # Initialize MLFlow logger with proper error handling
     # For DDP, delay initialization until after strategy setup to avoid serialization issues
     mlflow_tracking_uri = os.environ.get("MLFLOW_TRACKING_URI")
@@ -372,6 +404,7 @@ def main(
         schedular_type=lr_schedular,
         epochs=epochs,
         warmup_epochs=warmup_epochs,
+        hausdorff_in_validation=hausdorff_in_validation,
         max_hausdorff_size=max_hausdorff_size,
     )
 
@@ -419,7 +452,7 @@ def main(
             val_loader=val_loader,
             test_loader=test_loader,
             image_folder=image_folder,
-            mask_folder=mask_folder
+            mask_folder=mask_folder,
         )
         if dataset_logged:
             logger.info("Dataset tracking completed successfully")
@@ -491,6 +524,7 @@ def main(
         precision=precision,
         log_every_n_steps=10,
         accumulate_grad_batches=accumulate_iters,
+        check_val_every_n_epoch=validation_frequency,
     )
 
     # Train the model
@@ -500,7 +534,7 @@ def main(
     # This is necessary because we're switching from distributed to single-device execution
     if strategy == "ddp" and torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
-    
+
     # Run testing on a single device to avoid DDP issues with uneven batch distribution
     # Only rank 0 performs testing to ensure all samples are evaluated exactly once
     if trainer.is_global_zero:
@@ -516,7 +550,11 @@ def main(
         # Load the best model checkpoint
         if is_main_process:
             logger.info(f"Testing with best performing model parameters: \n\t{model_ckpt_callback.best_model_path}")
-        
+            if test_batch_size > 1:
+                logger.warning(
+                    "Test batch size is greater than 1! Per frame metrics will be the averaged across each batch."
+                )
+
         # Run test using the best model weights path
         test_module = SegmentationLightningModule.load_from_checkpoint(model_ckpt_callback.best_model_path)
         test_results = tester.test(model=test_module, dataloaders=test_loader)
@@ -533,17 +571,15 @@ def main(
             # Create test_images directory in output_data_dir
             test_images_dir = os.path.join(output_data_dir, "test_images")
             os.makedirs(test_images_dir, exist_ok=True)
-            
+
             # Iterate through test_log_images and save each as PNG
             for idx, img_data in enumerate(test_module.test_log_images):
                 img_path = os.path.join(test_images_dir, f"test_image_{idx}.png")
                 create_test_image_visualization(img_data, img_path)
-            
+
             # Log the test_images directory as MLFlow artifacts
             mlflow_logger.experiment.log_artifacts(
-                run_id=mlflow_logger.run_id,
-                local_dir=test_images_dir,
-                artifact_path="test_images"
+                run_id=mlflow_logger.run_id, local_dir=test_images_dir, artifact_path="test_images"
             )
             logger.info(f"Successfully logged {len(test_module.test_log_images)} test images to MLFlow")
         except Exception as e:
@@ -575,13 +611,13 @@ def main(
 
         per_image_metrics_path = os.path.join(output_data_dir, "per_image_metrics.csv")
         per_image_metrics.to_csv(per_image_metrics_path, index=False)
-        
+
         # Log per_image_metrics to MLFlow as artifact
         try:
             mlflow_logger.experiment.log_artifact(
                 run_id=mlflow_logger.run_id,
                 local_path=per_image_metrics_path,
-                artifact_path="metrics/per_image_metrics.csv"
+                artifact_path="metrics/per_image_metrics.csv",
             )
             logger.info("Successfully logged per_image_metrics.parquet to MLFlow")
         except Exception as e:
@@ -591,13 +627,11 @@ def main(
         test_results_path = os.path.join(output_data_dir, "test_results.yaml")
         with open(test_results_path, "w") as fp:
             yaml.dump(test_results, fp)
-        
+
         # Log test results to MLFlow as artifact
         try:
             mlflow_logger.experiment.log_artifact(
-                run_id=mlflow_logger.run_id,
-                local_path=test_results_path,
-                artifact_path="metrics"
+                run_id=mlflow_logger.run_id, local_path=test_results_path, artifact_path="metrics"
             )
             logger.info("Successfully logged test_results.yaml to MLFlow")
         except Exception as e:
@@ -672,36 +706,36 @@ def save_test_result_image(image, gt_mask, pred_mask, fname):
 def create_test_image_visualization(img_data: dict, output_path: str) -> None:
     """
     Create a composite visualization of test image with ground truth and prediction.
-    
-    :param img_data: Dictionary containing 'image' (PIL Image), 'pred_mask' (numpy array), 
+
+    :param img_data: Dictionary containing 'image' (PIL Image), 'pred_mask' (numpy array),
                      and 'gt_mask' (numpy array)
     :param output_path: Path where the visualization should be saved
     """
     import numpy as np
-    
+
     # Extract data from dictionary
     pil_image = img_data["image"]
     pred_mask = img_data["pred_mask"]
     gt_mask = img_data["gt_mask"]
-    
+
     # Convert PIL image to numpy array for visualization
     img_array = np.array(pil_image)
-    
+
     # Create figure with 3 subplots: input, ground truth, prediction
     fig, axs = plt.subplots(1, 3, figsize=(15, 5))
-    
+
     axs[0].imshow(img_array, cmap="gray")
     axs[0].set_title("Input")
     axs[0].axis("off")
-    
+
     axs[1].imshow(gt_mask, cmap="gray")
     axs[1].set_title("Ground Truth")
     axs[1].axis("off")
-    
+
     axs[2].imshow(pred_mask, cmap="gray")
     axs[2].set_title("Prediction")
     axs[2].axis("off")
-    
+
     plt.savefig(output_path, bbox_inches="tight")
     plt.close(fig)
 

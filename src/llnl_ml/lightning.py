@@ -29,6 +29,7 @@ class SegmentationLightningModule(pl.LightningModule):
         epochs: int = 10,
         warmup_epochs: int = 1,
         schedular_params: Optional[dict] = None,
+        hausdorff_in_validation: bool = False,
         max_hausdorff_size: int = -1,
         **kwargs,
     ):
@@ -55,6 +56,7 @@ class SegmentationLightningModule(pl.LightningModule):
         self.dice_metric = DiceScore(2, include_background=False, input_format="one-hot", average="macro")
         self.mathew_coer_metric = BinaryMatthewsCorrCoef(ignore_index=0, threshold=0.5)
         self.hausdorff_metric = HausdorffDistance(2, include_background=False, input_format="one-hot")
+        self._hausdorff_in_validation = hausdorff_in_validation
         self._max_hausdorff_size = max_hausdorff_size
 
         # Aggregates the first 5 test images to be logged
@@ -71,19 +73,19 @@ class SegmentationLightningModule(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         image, targets = batch
-        
+
         # All models now return loss dict
         pred_logits, loss_dict = self.model(image, targets)
-        
+
         # Compute total loss
         total_loss = sum(loss for loss in loss_dict.values())
-        
+
         # Add total_loss to dict for logging
         loss_dict_with_total = {**loss_dict, "total_loss": total_loss}
-        
+
         # Log all losses
         self.log_dict(loss_dict_with_total, on_step=True, sync_dist=True, prog_bar=True)
-        
+
         return total_loss
 
     # Helper functions used in val and test
@@ -105,9 +107,8 @@ class SegmentationLightningModule(pl.LightningModule):
         mask = mask.long()
         # Send logits through sigmoid to create probabilities
         pred_prob = torch.nn.functional.sigmoid(pred_logits)
-        
-        return images, mask, pred_prob, pred_logits, losses
 
+        return images, mask, pred_prob, pred_logits, losses
 
     def validation_step(self, batch, batch_idx):
         # Get prediction and losses from model
@@ -124,16 +125,26 @@ class SegmentationLightningModule(pl.LightningModule):
         self.jaccard_metric(pred_prob, mask)
         self.mathew_coer_metric(pred_prob, mask)
         self.dice_metric(pred_mask, mask)
-        if self._max_hausdorff_size > -1:
-            pred_mask = torch.nn.functional.interpolate(pred_mask.to(torch.uint8), size=(self._max_hausdorff_size, self._max_hausdorff_size), mode="nearest-exact")
-            mask = torch.nn.functional.interpolate(mask.to(torch.uint8), size=(self._max_hausdorff_size, self._max_hausdorff_size), mode="nearest-exact")
-        self.hausdorff_metric(pred_mask.cpu(), mask.cpu())
 
         self.log("val_dice", self.dice_metric, on_step=False, on_epoch=True, prog_bar=True)
         self.log("val_jaccard", self.jaccard_metric, on_step=False, on_epoch=True, prog_bar=True)
         self.log("val_acc", self.acc_metric, on_step=False, on_epoch=True, prog_bar=True)
         self.log("val_mathews", self.mathew_coer_metric, on_step=False, on_epoch=True, prog_bar=True)
-        self.log("val_hausdorff", self.hausdorff_metric, on_step=False, on_epoch=True, prog_bar=True)
+
+        if self._hausdorff_in_validation:
+            if self._max_hausdorff_size > -1:
+                pred_mask = torch.nn.functional.interpolate(
+                    pred_mask.to(torch.uint8),
+                    size=(self._max_hausdorff_size, self._max_hausdorff_size),
+                    mode="nearest-exact",
+                )
+                mask = torch.nn.functional.interpolate(
+                    mask.to(torch.uint8),
+                    size=(self._max_hausdorff_size, self._max_hausdorff_size),
+                    mode="nearest-exact",
+                )
+            self.hausdorff_metric(pred_mask.cpu(), mask.cpu())
+            self.log("val_hausdorff", self.hausdorff_metric, on_step=False, on_epoch=True, prog_bar=True)
 
     def test_step(self, batch, batch_idx):
         # Get prediction and losses from model
@@ -143,18 +154,24 @@ class SegmentationLightningModule(pl.LightningModule):
         # Add total loss and prepend test_ to all loss keys
         losses["total_loss"] = sum(losses.values())
         losses = {f"test_{key}": value for key, value in losses.items()}
-        
+
         self.log_dict(losses, on_step=False, on_epoch=True, sync_dist=True, prog_bar=True)
-        
-        self.acc_metric(pred_prob, mask)
-        self.jaccard_metric(pred_prob, mask)
-        self.mathew_coer_metric(pred_prob, mask)
-        self.dice_metric(pred_mask, mask)
+
+        acc = self.acc_metric(pred_prob, mask)
+        jaccard = self.jaccard_metric(pred_prob, mask)
+        mathrews_cc = self.mathew_coer_metric(pred_prob, mask)
+        dice = self.dice_metric(pred_mask, mask)
         resized_mask = mask
         if self._max_hausdorff_size > -1:
-            pred_mask = torch.nn.functional.interpolate(pred_mask.to(torch.uint8), size=(self._max_hausdorff_size, self._max_hausdorff_size), mode="nearest-exact")
-            resized_mask = torch.nn.functional.interpolate(mask.to(torch.uint8), size=(self._max_hausdorff_size, self._max_hausdorff_size), mode="nearest-exact")
-        self.hausdorff_metric(pred_mask.cpu(), resized_mask.cpu())
+            pred_mask = torch.nn.functional.interpolate(
+                pred_mask.to(torch.uint8),
+                size=(self._max_hausdorff_size, self._max_hausdorff_size),
+                mode="nearest-exact",
+            )
+            resized_mask = torch.nn.functional.interpolate(
+                mask.to(torch.uint8), size=(self._max_hausdorff_size, self._max_hausdorff_size), mode="nearest-exact"
+            )
+        hausdorff = self.hausdorff_metric(pred_mask.cpu(), resized_mask.cpu())
 
         self.log("test_dice", self.dice_metric, on_step=False, on_epoch=True, prog_bar=True)
         self.log("test_jaccard", self.jaccard_metric, on_step=False, on_epoch=True, prog_bar=True)
@@ -173,11 +190,11 @@ class SegmentationLightningModule(pl.LightningModule):
             self.test_image_metrics.append(
                 {
                     "image_name": img_name,
-                    "dice": dice_score((img_pred > 0.5).long(), gt_mask, num_classes=2, include_background=False, average="macro").cpu().item(),
-                    "jaccard": torchmetrics.functional.jaccard_index((img_pred > 0.5).long(), gt_mask, task="binary")
-                    .cpu()
-                    .item(),
-                    "acc": torchmetrics.functional.accuracy((img_pred > 0.5).long(), gt_mask, task="binary").cpu().item(),
+                    "dice": dice.cpu().item(),
+                    "jaccard": jaccard.cpu().item(),
+                    "acc": acc.cpu().item(),
+                    "mathews_cc": mathrews_cc.cpu().item(),
+                    "hausdorff": hausdorff.cpu().item(),
                 }
             )
         # If this is one of the first 5 test images, save out the mask and image
@@ -188,11 +205,13 @@ class SegmentationLightningModule(pl.LightningModule):
                 np_gt_mask = gt_mask.cpu().permute((1, 2, 0)).numpy()
                 pil_image = to_pil_image(img.cpu())
                 # Store raw image data for logger-agnostic artifact logging
-                self.test_log_images.append({
-                    "image": pil_image,
-                    "pred_mask": np_pred_mask,
-                    "gt_mask": np_gt_mask,
-                })
+                self.test_log_images.append(
+                    {
+                        "image": pil_image,
+                        "pred_mask": np_pred_mask,
+                        "gt_mask": np_gt_mask,
+                    }
+                )
                 self.test_log_images_raw.append(
                     (img.cpu().squeeze().numpy(), np_gt_mask, img_pred.cpu().squeeze().numpy())
                 )
@@ -207,7 +226,7 @@ class SegmentationLightningModule(pl.LightningModule):
             scheduler_type=self.scheduler_type,
             lr_scheduler_params=self._lr_scheduler_params,
             max_iters=int(self.trainer.estimated_stepping_batches),
-            warmup_percent=(self.warmup_epochs / self.epochs)
+            warmup_percent=(self.warmup_epochs / self.epochs),
         )
 
         return optimizers
