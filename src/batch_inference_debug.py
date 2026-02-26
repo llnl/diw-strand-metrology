@@ -186,7 +186,7 @@ def predict_fn(input_object, model, context):
 
             # Add a batch dimension and move to device
             image = image.unsqueeze(0).to(device)
-            mask_tensor = torch.tensor(mask, dtype=torch.float).unsqueeze(0).to(device)
+            mask_tensor = torch.tensor(mask, dtype=torch.float).unsqueeze(0).unsqueeze(0).to(device)
             # pass through model with targets so loss is computed
             with torch.no_grad():
                 prediction, loss_dict = model(image, {"masks": mask_tensor})
@@ -207,7 +207,7 @@ def predict_fn(input_object, model, context):
 
         loss = sum(value.cpu().item() for value in loss_dict.values())
         pred_tensor = torch.tensor(prediction)
-        mask_metric_tensor = torch.tensor(mask, dtype=torch.float)
+        mask_metric_tensor = torch.tensor(mask_tensor, dtype=torch.float)
         pred_mask_tensor = (torch.sigmoid(pred_tensor) > 0.5).long()
         mask_long_tensor = mask_metric_tensor.long()
         acc = float(acc_metric(pred_tensor, mask_metric_tensor))

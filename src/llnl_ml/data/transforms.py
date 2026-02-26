@@ -1,6 +1,9 @@
 import albumentations as A
+import logging
+import os
 import yaml
 import inspect
+from pathlib import Path
 from typing import Tuple, Dict, Type, Any
 
 from .exceptions import TransformConfigError, ParameterValidationError, TransformConstructionError
@@ -51,12 +54,60 @@ class TransformRegistry:
         """Return list of all available transform names."""
         return sorted(self.transforms.keys())
 
+def _resolve_config_path(config_file: str) -> str:
+    """Resolve a config filename to a full path.
+
+    If *config_file* is a bare filename (no directory component) and does not
+    exist at the current working directory, attempt to locate it inside the
+    bundled ``llnl_ml/configs/`` package directory.
+
+    Args:
+        config_file: A path or bare filename such as ``"default_transforms.yaml"``.
+
+    Returns:
+        The resolved path as a string.  If the file cannot be found in the
+        configs directory the original value is returned unchanged (so that
+        downstream code raises the appropriate ``FileNotFoundError``).
+    """
+    logger = logging.getLogger(__name__)
+
+    # Only attempt resolution when the caller passed a bare filename
+    if os.path.basename(config_file) != config_file:
+        return config_file
+
+    # Already exists relative to cwd – nothing to resolve
+    if os.path.exists(config_file):
+        return config_file
+
+    # Try importlib.resources first (works with installed packages)
+    try:
+        from importlib.resources import files as _files
+
+        config_resource = _files("llnl_ml.configs") / config_file
+        if hasattr(config_resource, "is_file") and config_resource.is_file():
+            resolved = str(config_resource)
+            logger.info(f"Resolved config '{config_file}' from package: {resolved}")
+            return resolved
+    except Exception as exc:
+        logger.debug(f"importlib.resources lookup failed: {exc}")
+
+    # Fallback: resolve relative to this source file
+    fallback = Path(__file__).parent.parent / "configs" / config_file
+    if fallback.exists():
+        resolved = str(fallback)
+        logger.info(f"Resolved config '{config_file}' via fallback path: {resolved}")
+        return resolved
+
+    return config_file
 
 def build_transforms(config_file: str) -> Tuple[A.Compose, A.Compose]:
     """
     Builds the train and validation/test transform sets from the given config_file.
-    The config_file is yaml format and should contain a train and val section with 
+    The config_file is yaml format and should contain a train and val section with
     each section being a list of augmentation dicts.
+
+    If config_file is a bare filename (no directory separators), it will be resolved
+    against the bundled configs directory (llnl_ml/configs/).
 
     train:
         - name: RandomCrop
@@ -75,16 +126,19 @@ def build_transforms(config_file: str) -> Tuple[A.Compose, A.Compose]:
         - name: ToTensorV2
 
     Args:
-        config_file: Path to YAML configuration file
-        
+        config_file: Path to YAML configuration file, or a bare filename to
+                     resolve from the bundled configs directory.
+
     Returns:
         Tuple of (train_transforms, val_transforms)
-        
+
     Raises:
         FileNotFoundError: If config file doesn't exist
         yaml.YAMLError: If config file has invalid YAML syntax
         TransformConfigError: If transform specifications are invalid
     """
+    config_file = _resolve_config_path(config_file)
+
     try:
         with open(config_file, 'r') as fp:
             transform_config = yaml.safe_load(fp)
@@ -92,10 +146,10 @@ def build_transforms(config_file: str) -> Tuple[A.Compose, A.Compose]:
         raise FileNotFoundError(f"Configuration file not found: {config_file}")
     except yaml.YAMLError as e:
         raise TransformConfigError(f"Invalid YAML syntax in {config_file}: {e}")
-    
+
     if transform_config is None:
         transform_config = {}
-    
+
     # Handle missing sections gracefully with empty defaults
     train_transforms = _build_transform(transform_config.get("train", []))
     val_transforms = _build_transform(transform_config.get("val", []))
