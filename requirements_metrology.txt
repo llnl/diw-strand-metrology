@@ -1,0 +1,15 @@
+# Requirements for edt_skeleton_demo.ipynb
+# Tested with Python 3.12 on macOS (Apple Silicon)
+#
+# Install via:
+#   pip install -r requirements_metrology.txt
+
+numpy==2.2.6
+scipy==1.16.2
+scikit-image==0.25.2
+scikit-learn==1.7.2
+matplotlib==3.10.6
+pandas==2.3.2
+pillow==11.2.1
+fil-finder>=1.7.0
+astropy>=6.0.0

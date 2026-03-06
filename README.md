@@ -12,7 +12,7 @@ and [Batch Inference](#batch-inference). Refer to each section for details on ea
 
 The training code utilizes the following:
 
-* Python 3.10
+* Python 3.12
 * [PyTorch](https://pytorch.org/docs/stable/index.html) >= 2.0.1
 * [TorchVision](https://pytorch.org/vision/stable/index.html) >= 0.15
 * [PyTorch Lightning](https://lightning.ai/docs/pytorch/stable/)
@@ -257,7 +257,7 @@ To create a virtual environment:
 
 ```shell
 $ cd <repository_root>
-$ python3.10 -m virtualenv env  # Use the specific version of python you want to use when calling
+$ python3.12 -m virtualenv env  # Use the specific version of python you want to use when calling
 ```
 
 After pre-commit is installed, all checks will be run automatically whenever git commit is performed.

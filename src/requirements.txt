@@ -1,3 +1,5 @@
+# Runs on SageMaker PyTorch 2.7 / Python 3.12 container
+# Base image: 763104351884.dkr.ecr.us-west-2.amazonaws.com/pytorch-training:2.7-gpu-py312
 torch>=2.3.1
 torchvision>=0.15.2
 torchmetrics>=1.7.0
