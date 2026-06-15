@@ -1,12 +1,24 @@
+"""Generate train/val/test split files for segmentation training.
+
+NOTE: The canonical, leak-free split used for the published results is provided directly as
+``classical_baseline/diw_R4_full.json`` (a stratified 80/10/10 split with disjoint train/val/test sets
+and a frozen per-geometry test split). Prefer that file for reproduction. This script regenerates splits
+from scratch; pass ``--metadata_csv`` (with an ``S3 URI`` column and a class column, e.g. ``Structure``)
+to produce a geometry-stratified split that keeps the per-class proportions balanced across train/val/test.
+Without ``--metadata_csv`` it produces a plain random split.
+"""
+
 import argparse
 import boto3
+import csv
 import json
 import logging
 import os
 import sys
 
+from collections import defaultdict
 from sklearn.model_selection import train_test_split
-from typing import Sequence
+from typing import Optional, Sequence
 
 
 logger = logging.getLogger("CreateDataSplit")
@@ -56,8 +68,34 @@ def parse_args() -> argparse.Namespace:
         "--region", help="S3 region bucket is located in. Default us-west-2", type=str, default="us-west-2"
     )
     parser.add_argument("--seed", help="Integer seed for randomizer", type=int, default=42)
+    parser.add_argument(
+        "--metadata_csv",
+        help=(
+            "Optional local path or S3 URI to a CSV with an 'S3 URI' column and a class column "
+            "(see --class_column). When provided, the split is stratified by class so per-class "
+            "proportions are preserved across train/val/test. Filenames are matched by basename."
+        ),
+        type=str,
+        default=None,
+    )
+    parser.add_argument(
+        "--class_column", help="Class column in --metadata_csv for stratification. Default 'Structure'", type=str,
+        default="Structure",
+    )
 
     return parser.parse_args()
+
+
+def load_class_map(metadata_csv: str, region: str, class_column: str) -> dict:
+    """Return {image_basename: class_label} from a CSV with an 'S3 URI' column."""
+    if metadata_csv.startswith("s3://"):
+        bucket, key = metadata_csv.removeprefix("s3://").split("/", 1)
+        body = boto3.client("s3", region_name=region).get_object(Bucket=bucket, Key=key)["Body"].read().decode()
+        rows = list(csv.DictReader(body.splitlines()))
+    else:
+        with open(metadata_csv) as fp:
+            rows = list(csv.DictReader(fp))
+    return {os.path.basename(r["S3 URI"]).strip(): r[class_column] for r in rows}
 
 
 def main(
@@ -69,6 +107,8 @@ def main(
     test_percent: float = 0.1,
     seed: int = 42,
     region: str = "us-west-2",
+    metadata_csv: Optional[str] = None,
+    class_column: str = "Structure",
 ) -> None:
     # Get list of image and mask filenames
     logger.info("Finding images files...")
@@ -103,14 +143,34 @@ def main(
             f"\n\ttraing_percent: {train_percent:.2f}, val_percent: {val_percent:.2f}, test_percent: {test_percent:.2f}"
         )
 
-    img_train, img_temp, mask_train, mask_temp = train_test_split(
-        image_filenames, mask_filenames, train_size=train_percent, random_state=seed
-    )
+    if metadata_csv:
+        # Geometry-stratified split: split within each class so per-class proportions are
+        # preserved across train/val/test (the leak-free strategy used for the published split).
+        class_map = load_class_map(metadata_csv, region, class_column)
+        logger.info(f"Stratifying by '{class_column}' using {len(class_map)} labeled entries.")
+        by_class = defaultdict(list)
+        for img, msk in zip(image_filenames, mask_filenames):
+            by_class[class_map.get(os.path.basename(img).strip(), "UNKNOWN")].append((img, msk))
+        img_train, img_val, img_test = [], [], []
+        mask_train, mask_val, mask_test = [], [], []
+        val_frac = val_percent / (val_percent + test_percent)
+        for cls, pairs in sorted(by_class.items()):
+            imgs = [p[0] for p in pairs]
+            msks = [p[1] for p in pairs]
+            it, itmp, mt, mtmp = train_test_split(imgs, msks, train_size=train_percent, random_state=seed)
+            iv, ite, mv, mte = train_test_split(itmp, mtmp, train_size=val_frac, random_state=seed)
+            img_train += it; img_val += iv; img_test += ite
+            mask_train += mt; mask_val += mv; mask_test += mte
+            logger.info(f"  {cls}: train {len(it)}, val {len(iv)}, test {len(ite)}")
+    else:
+        img_train, img_temp, mask_train, mask_temp = train_test_split(
+            image_filenames, mask_filenames, train_size=train_percent, random_state=seed
+        )
 
-    val_percent = val_percent / (val_percent + test_percent)
-    img_val, img_test, mask_val, mask_test = train_test_split(
-        img_temp, mask_temp, train_size=val_percent, random_state=seed
-    )
+        val_percent = val_percent / (val_percent + test_percent)
+        img_val, img_test, mask_val, mask_test = train_test_split(
+            img_temp, mask_temp, train_size=val_percent, random_state=seed
+        )
 
     split_dict = {
         "train": {"image": img_train, "mask": mask_train},

@@ -1,12 +1,20 @@
-# LLNL Machine Learning Library
-This repository contains code and notebooks for training semantic segmentation models on LLNL's layered fabrication datasets.
+# DIW strand metrology
 
-The repository is broken into two main directories 1) `notebooks` and 2) `llnl_ml`. First, `notebooks` contains Jupyter
-notebooks for launching training jobs, performing qualitative model evaluation and launching batch jobs. The `llnl_ml` folder
-contains all required model training code including the model definitions, data loaders, and training loop.
+Code and notebooks for the on-machine inspection pipeline described in *Scalable on-machine inspection of
+direct ink write additive manufacturing* (Weston et al.). The pipeline segments top-layer filaments in
+layerwise Direct Ink Writing (DIW) camera images with a compact U-Net, then extracts filament diameter
+via a calibrated Euclidean distance transform (EDT) and medial-axis skeletonization, aggregating to
+per-image and full-part statistics.
 
-This readme is broken into 3 primary sections: [Model Training](#model-training), [Model Evaluation](#model-evaluation),
-and [Batch Inference](#batch-inference). Refer to each section for details on each step of the modelling process.
+The repository contains: `src/llnl_ml` (model definitions, data loaders, training loop), `notebooks`
+(launch SageMaker training/batch jobs, qualitative evaluation, and the EDT + skeletonization metrology
+demo `edt_skeleton_demo.ipynb`), and `classical_baseline` (the classical computer-vision segmentation
+baseline used to demonstrate the necessity of a learned model). A minimal metrology environment is pinned
+in `requirements_metrology.txt`, and example human-labeled masks are in `sample_masks/`.
+
+This readme covers: [Model Training](#model-training), [Class-balanced training](#class-balanced-training),
+[Model Evaluation](#model-evaluation), [Batch Inference](#batch-inference), and
+[Classical baseline](#classical-baseline).
 
 ## Model Training
 
@@ -184,6 +192,27 @@ MODEL_NAMES = {
 }
 ```
 
+### Data splits
+
+The canonical, leak-free split used for the published results is provided directly as
+[`classical_baseline/diw_R4_full.json`](classical_baseline/diw_R4_full.json): a stratified 80/10/10
+split with disjoint train/val/test sets and a frozen per-geometry test split, with per-image geometry
+labels in [`classical_baseline/diw_R4_geom.csv`](classical_baseline/diw_R4_geom.csv). Prefer this file
+for reproduction. To regenerate splits from scratch, [`bin/create_data_splits.py`](bin/create_data_splits.py)
+produces a random split by default, or a geometry-stratified split when given `--metadata_csv` (with an
+`S3 URI` column and a `--class_column`, default `Structure`).
+
+## Class-balanced training
+
+The labeled corpus is imbalanced across lattice geometries (FCT-dominant). To train with an equalized
+per-epoch geometry frequency *without discarding data*, pass `--class_balanced_sampler true` together
+with `--metadata_file <csv>` (the CSV must contain a class column, default `Structure`; see
+`--balance_column`). Under-represented geometries are oversampled and over-represented geometries are
+drawn less often per epoch, but every image remains eligible. The sampler
+(`src/llnl_ml/data/balanced_sampler.py`) is DDP-aware: when it is active the Lightning Trainer is created
+with `use_distributed_sampler=False` so the weighting is preserved under multi-GPU training. See
+`tests/test_balanced_sampler.py` for the equalization and DDP-sharding checks.
+
 ### Viewing Tensorboard via SageMaker Studio
 
 Full documentation of viewing and using Tensorboard within SageMaker Studio can be found at:
@@ -224,6 +253,23 @@ to be downloaded.
 
 Once the model is trained, find the name of the trained job and use the [LaunchBatchJob](notebooks/LaunchBatchJob.ipynb)
 notebook to start a training job.
+
+## Classical baseline
+
+The [`classical_baseline`](classical_baseline/) directory reproduces the classical computer-vision
+comparison (Otsu, Sauvola, Canny, Frangi) used to demonstrate that a learned model is necessary for this
+task. Each method's global hyperparameters are tuned on the validation split and frozen before a single
+evaluation on the held-out test split (one global configuration per method, mirroring the single global
+U-Net). See [`classical_baseline/README.md`](classical_baseline/README.md) for usage. Summary: the best
+classical method plateaus at Dice 0.708 versus 0.973 for the U-Net, with the largest gap on the dense FCT
+lattice, because separating the top layer from lower-layer bleed-through is a semantic distinction that
+intensity- or edge-based rules cannot make.
+
+## Metrology demo
+
+[`notebooks/edt_skeleton_demo.ipynb`](notebooks/edt_skeleton_demo.ipynb) demonstrates the EDT +
+medial-axis skeletonization step that converts a binary top-layer mask into per-filament diameter, using
+the calibrated pixel pitch (3.249 µm/px). Example masks are provided in `sample_masks/`.
 
 ## Pre-commit Hooks
 This directory has [pre-commit](https://pre-commit.com/) hooks enabled. Pre-commit runs a number of standard formatting

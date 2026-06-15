@@ -6,6 +6,7 @@ from typing import Optional
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, default_collate
 
+from .balanced_sampler import DistributedWeightedSampler, build_class_balanced_weights
 from .dataset import SegmentationDataset
 from .transforms import build_transforms
 from .utils import load_json_file
@@ -28,7 +29,16 @@ def get_dataloaders(
     test_batch_size: int = 1,
     num_workers: int = 8,
     model_class: Optional[type] = None,
+    balance_label_map: Optional[dict] = None,
 ):
+    """Build train/val/test dataloaders.
+
+    :param balance_label_map: Optional mapping of image basename -> class label. When provided, the
+        training loader uses a class-balanced (DDP-aware) weighted sampler that equalizes per-epoch
+        class frequency without discarding data. When used, the returned ``uses_custom_sampler`` flag
+        is True and the Lightning Trainer must be created with ``use_distributed_sampler=False``.
+    :return: ``(train_loader, val_loader, test_loader, uses_custom_sampler)``
+    """
     # Get the image and mask file paths for each split
     train_paths, val_paths, test_paths = get_paths_for_splits(image_folder, mask_folder, split_file, train_count)
 
@@ -60,11 +70,22 @@ def get_dataloaders(
     # Build the dataloaders
     val_batch_size = val_batch_size if val_batch_size is not None else batch_size
 
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=True, collate_fn=collate_fn)
+    # Optionally build a class-balanced sampler. When active, shuffle must be disabled (the sampler
+    # handles ordering) and the Lightning Trainer must set use_distributed_sampler=False so it does
+    # not replace this sampler under DDP.
+    train_sampler = None
+    uses_custom_sampler = False
+    if balance_label_map:
+        weights = build_class_balanced_weights(train_paths["image_paths"], balance_label_map)
+        train_sampler = DistributedWeightedSampler(weights)
+        uses_custom_sampler = True
+
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, num_workers=num_workers,
+                                  shuffle=(train_sampler is None), sampler=train_sampler, collate_fn=collate_fn)
     val_dataloader = DataLoader(val_dataset, batch_size=val_batch_size, num_workers=num_workers, shuffle=False, collate_fn=collate_fn)
     test_dataloader = DataLoader(test_dataset, batch_size=test_batch_size, num_workers=num_workers, shuffle=False, collate_fn=collate_fn)
 
-    return train_dataloader, val_dataloader, test_dataloader
+    return train_dataloader, val_dataloader, test_dataloader, uses_custom_sampler
 
 
 def get_paths_for_splits(

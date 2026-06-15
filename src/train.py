@@ -161,6 +161,23 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--class_balanced_sampler",
+        type=str2bool,
+        default=False,
+        help=(
+            "If True, use a class-balanced (DDP-aware) weighted sampler for training that equalizes "
+            "per-epoch class frequency without discarding data. Requires --metadata_file with a class "
+            "column (see --balance_column). Under-represented classes are oversampled and over-represented "
+            "classes are drawn less often per epoch; all images remain eligible."
+        ),
+    )
+    parser.add_argument(
+        "--balance_column",
+        type=str,
+        default="Structure",
+        help="Column in --metadata_file holding the class label used by --class_balanced_sampler.",
+    )
+    parser.add_argument(
         "--transform_config",
         type=str,
         default="",
@@ -266,6 +283,8 @@ def main(
     metadata_file: str = "",
     hausdorff_in_validation: bool = False,
     max_hausdorff_size: int = 256,
+    class_balanced_sampler: bool = False,
+    balance_column: str = "Structure",
 ) -> None:
     """
     :param model_name: Name of model to train
@@ -427,8 +446,29 @@ def main(
         logger.warning(f"Could not get model class: {e}. Using default dataset format.")
         model_class = None
 
+    # Build the class-balance label map for the sampler if requested. Reuses the same metadata file
+    # used for per-class test metrics, mapping image basename -> class label.
+    balance_label_map = None
+    if class_balanced_sampler:
+        if not metadata_file:
+            raise ValueError(
+                f"--class_balanced_sampler requires --metadata_file with a '{balance_column}' column."
+            )
+        balance_metadata = load_metadata(metadata_file)
+        if balance_column not in balance_metadata.columns:
+            raise ValueError(
+                f"--balance_column '{balance_column}' not found in metadata columns: "
+                f"{list(balance_metadata.columns)}"
+            )
+        balance_label_map = dict(zip(balance_metadata["image_name"], balance_metadata[balance_column]))
+        if is_main_process:
+            logger.info(
+                f"Class-balanced sampler enabled on column '{balance_column}' "
+                f"({len(balance_label_map)} labeled images)"
+            )
+
     # Get the data loaders
-    train_loader, val_loader, test_loader = get_dataloaders(
+    train_loader, val_loader, test_loader, uses_custom_sampler = get_dataloaders(
         image_folder=image_folder,
         mask_folder=mask_folder,
         batch_size=batch_size,
@@ -439,6 +479,7 @@ def main(
         test_batch_size=test_batch_size,
         num_workers=num_workers,
         model_class=model_class,
+        balance_label_map=balance_label_map,
     )
 
     # Log dataset information to MLFlow
@@ -513,6 +554,11 @@ def main(
         )
 
     # Create Trainer
+    # When using the custom class-balanced sampler, prevent Lightning from injecting its own
+    # DistributedSampler (which would discard the weighting under DDP). The sampler is DDP-aware.
+    if uses_custom_sampler and is_main_process:
+        logger.info("Using custom class-balanced sampler: disabling Lightning's distributed sampler injection.")
+
     trainer = pl.Trainer(
         max_epochs=epochs,
         accelerator=accelerator,
@@ -525,6 +571,7 @@ def main(
         log_every_n_steps=10,
         accumulate_grad_batches=accumulate_iters,
         check_val_every_n_epoch=validation_frequency,
+        use_distributed_sampler=not uses_custom_sampler,
     )
 
     # Train the model

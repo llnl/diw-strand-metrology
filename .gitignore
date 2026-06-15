@@ -20,3 +20,8 @@ __pycache__
 # Pytorch
 *.pth
 *.pt
+
+# classical_baseline local artifacts (large image cache, generated outputs)
+classical_baseline/cache/
+classical_baseline/out/
+classical_baseline/model_*/
